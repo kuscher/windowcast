@@ -1,7 +1,8 @@
 # Windowcast design
 
 Date: 2026-09-27, revised the same day to bring multi-window, the Resize menu and
-key remapping into v1. Status: draft for review. Author: Alex Kuscher with Claude.
+key remapping into v1, and on 2026-09-28 to add internet access (M7) and the
+split of work between Claude and Alex. Status: draft for review. Author: Alex Kuscher with Claude.
 
 Windowcast streams macOS windows, or a whole display, from a Mac Studio to a
 Googlebook, where each one appears as an ordinary resizable Android window that
@@ -28,17 +29,19 @@ Compose **client** on Android, joined by WebRTC on the local network.
    60 ms on home Wi-Fi, text readable at the Googlebook's native pixels.
 7. Follow the window: the stream tracks moves and resizes, pauses when the
    window is minimized, and ends cleanly when it closes.
-8. Pair once with a PIN, then reconnect with one click. Nothing leaves the LAN.
+8. Pair once with a PIN, then reconnect with one click. At home nothing leaves
+   the LAN; away from home the same session runs over your own Tailscale
+   network from any Wi-Fi or a phone hotspot, with no server of ours in between.
 9. Build and install from the Mac with one helper script; release an APK and a
    host app zip on GitHub.
 
 ### Non-goals (v1)
 
-Audio, file transfer, other host platforms, internet relay servers, non-US
-base keyboard layouts (remap rules and the text fallback cover individual
+Audio, file transfer, other host platforms, relay or signaling servers run by
+us (remote access rides on Tailscale), non-US base keyboard layouts (remap rules and the text fallback cover individual
 keys), remote cursor shapes, HDR, touch-first gestures, unattended access to
 the login window, per-host keymap profiles, and two clients controlling the
-same window. Section 13 lists which of these are planned for phase 2.
+same window. Section 14 lists which of these are planned for phase 2.
 
 ## 2. Context and constraints
 
@@ -60,7 +63,7 @@ loses its Screen Recording and Accessibility grants.
 - No open-source remote desktop streams a single macOS window with control.
   RustDesk captures displays through the obsoleted CGDisplayStream API and its
   protocol has no window concept. Sunshine's macOS host is experimental with a
-  fixed per-session resolution. Both were rejected as bases; section 16 lists
+  fixed per-session resolution. Both were rejected as bases; section 17 lists
   the prior art examined.
 - ScreenCaptureKit's single-window filter (`desktopIndependentWindow`) omits the
   app's menus, popovers, sheets and dialogs. A display filter that includes
@@ -117,8 +120,8 @@ One control connection per client carries all of that client's sessions, up to
 six at once. Each session (one Mac window or display) has its own peer
 connection, video track and data channels, so a failing session never disturbs
 the others and each Android window owns exactly one. The host is the WebRTC
-offerer. ICE uses host candidates only (no STUN or TURN); Tailscale addresses
-are ordinary host candidates, which is the intended path to remote use later.
+offerer. ICE uses host candidates only (no STUN or TURN); away from home the
+candidates are the two devices' Tailscale addresses (section 10).
 
 Keyboard translation happens on the client: it knows the physical keyboard and
 the user's remap rules, and sends the Mac virtual key and modifier flags to
@@ -568,7 +571,74 @@ other key. The keymap is global in v1; per-host profiles are phase 2.
 - The host injects input only for an authenticated session and shows a
   visible indicator while streaming.
 
-## 10. Performance targets and tuning
+## 10. Remote access over the internet
+
+Away from home the Googlebook reaches the Mac through a Tailscale tailnet.
+Tailscale is free for personal use, and Windowcast runs no servers of its own.
+Nothing in the protocol changes: Tailscale gives both machines stable
+addresses in 100.64.0.0/10 and MagicDNS names, does the NAT and carrier-grade
+NAT traversal (direct WireGuard when it can, its DERP relays when it cannot),
+and keeps the host's port reachable only from devices on the tailnet.
+
+### Why Tailscale and not a relay of our own
+
+- A cloud signaling relay plus a TURN server would need a hosted service, a
+  domain, credentials on both ends and an internet-exposed host port. That is
+  more code and more attack surface than the rest of the MVP together, for a
+  single user. It stays in the phase 2 backlog for people who cannot run
+  Tailscale.
+- Port forwarding with dynamic DNS exposes the host directly and still fails
+  behind the carrier-grade NAT that phone hotspots use.
+- Tailscale's Android client is an ordinary VPN app from the Play Store with
+  app-based split tunneling, and its macOS app ships a status CLI.
+
+### What changes in the host
+
+- Addresses: the host lists its own interface addresses and shows them in
+  the popover, labelling any 100.64.0.0/10 address "Remote", plus the MagicDNS
+  name when `/Applications/Tailscale.app/Contents/MacOS/Tailscale status
+  --json` (or `tailscale` on the PATH) answers. The Bonjour advertisement
+  stays LAN-only; remote clients connect by address or name.
+- ICE: libwebrtc classifies `utun*` interfaces as VPN adapters and still
+  gathers their host candidates; `ignoreVPNNetworkAdapter` stays false and no
+  STUN or TURN is configured. The selected pair is Tailscale to Tailscale.
+- Remote defaults: when the control connection's peer address is on the
+  tailnet, new sessions start at a 12 Mbps cap and 30 fps unless the client's
+  per-host settings say otherwise.
+- Staying reachable: the host holds an `IOPMAssertion` that prevents idle
+  system sleep while any session runs, and the popover warns when the Mac's
+  energy settings would let it sleep with the display off, because a sleeping
+  Mac cannot be woken from the tailnet.
+
+### What changes in the client
+
+- A saved host keeps several addresses: the LAN address learned from Bonjour
+  and any address or name typed under "Add by address". Connecting tries the
+  LAN address first with a 1 s timeout, then the others; the Hosts screen
+  shows "Online (LAN)", "Online (remote)" or "Offline" from the same probe.
+- The Session toolbar shows a "Remote" badge and the live bitrate. The
+  Settings sheet gains "Remote quality": Balanced (12 Mbps, 30 fps) or Sharp
+  (25 Mbps, 60 fps).
+- A network change (Wi-Fi to hotspot) drops the peer connection; the reconnect
+  logic of section 5.3 restarts the session on the same target. An ICE restart
+  that keeps the session is phase 2.
+- With Tailscale's app-based split tunneling only Windowcast has to use the
+  VPN; `docs/REMOTE.md` shows the setting, but it is optional.
+
+### Security
+
+The pairing and token model is unchanged. The host's port is reachable from
+the LAN and from the tailnet only; `docs/REMOTE.md` includes a Tailscale ACL
+that limits port 47900 to the Googlebook. Media stays DTLS-SRTP inside
+WireGuard.
+
+### Verified before it is built
+
+Spike S3 in phase 0 proves the path: Tailscale on both devices, the Googlebook
+on a phone hotspot, a WebRTC stream over the tailnet, whether the pair is
+direct or relayed, and measured latency and bitrate for both.
+
+## 11. Performance targets and tuning
 
 | Metric | Target | How it is met or measured |
 |---|---|---|
@@ -577,6 +647,7 @@ other key. The keymap is global in v1; per-host profiles are phase 2.
 | Glass-to-glass latency on Wi-Fi | 60 ms typical, 80 ms worst case | playout delay 0/0 on both ends, no upscaling, stats overlay, camera test in S2 |
 | Input to visible effect | under 100 ms | unordered pointer channel, HID tap posting |
 | Bitrate | 2 to 40 Mbps adaptive per session | BWE bounds, per-host cap |
+| Remote session over Tailscale | connects within 5 s; 30 fps at 12 Mbps; latency under 120 ms on a direct WireGuard path | measured in S3 from a phone hotspot, direct and relayed |
 | Host CPU while idle in picker | under 5 percent | thumbnails only while subscribed, 2 s cadence |
 
 If measured latency in S2 exceeds target with the stock decoder, the client
@@ -585,7 +656,7 @@ exceeds target, the transport interface gains a raw H.264-over-TLS
 implementation (both sides isolate transport behind a `MediaTransport`
 interface from the start).
 
-## 11. Testing strategy
+## 12. Testing strategy
 
 - Shared test vectors in `protocol/testvectors/`: JSON message samples, binary
   input records, pairing proof vectors, coordinate fixtures and keymap cases
@@ -608,9 +679,13 @@ interface from the start).
   item including follow mode, minimize and restore, close, focus loss,
   shortcuts under each preset and a custom rule, scrolling, clipboard,
   reconnect, permission revoked mid-session.
-- Spikes S1 and S2 produce numbers and behavior tables before the MVP starts.
+- Spikes S1, S2 and S3 produce numbers and behavior tables before the MVP
+  starts.
+- Manual checklist additions for M7: connect by Tailscale address from the
+  LAN, from a phone hotspot, direct and relayed; Wi-Fi to hotspot switch
+  mid-session; host asleep; ACL blocking a second device.
 
-## 12. Repository, tooling, CI and licensing
+## 13. Repository, tooling, CI and licensing
 
 ```
 windowcast/
@@ -639,7 +714,7 @@ windowcast/
 - License MIT for this repository. Dependencies: libwebrtc (BSD-3),
   swift-certificates and swift-crypto (Apache-2.0), OkHttp (Apache-2.0).
 
-## 13. Delivery phases
+## 14. Delivery phases
 
 Each phase gets its own implementation plan. The phase 1 plan is written after
 the spikes report, so their findings feed it.
@@ -662,6 +737,11 @@ the spikes report, so their findings feed it.
   local network permission and foreground service in practice; whether
   Android 17 offers any app-initiated window resize. Exit: a numbers table and
   the codec and decoder decisions.
+- S3 remote access over Tailscale (Mac to Googlebook on a phone hotspot): the
+  S2 stream over the tailnet; which ICE candidates are gathered and selected;
+  direct versus DERP-relayed connection; latency and bitrate at 40 Mbps and
+  12 Mbps caps; behavior when the Googlebook switches networks mid-stream.
+  Exit: a numbers table and the remote defaults for M7.
 
 ### Phase 1: MVP, one runnable increment per milestone
 
@@ -683,17 +763,39 @@ the spikes report, so their findings feed it.
 - M6 Hardening and release: stats overlay, remaining settings,
   permission-revoked handling, CI, README with Googlebook install steps,
   CLAUDE.md, TESTING.md, PICKING-UP.md, v0.1 release.
+- M7 Internet access: host address list with Tailscale detection and the
+  sleep-prevention assertion; client hosts with several addresses, LAN-first
+  connection with fallback, the Remote badge and quality presets; reconnect
+  across network changes; `docs/REMOTE.md` with the Tailscale setup and ACL;
+  one remote session from outside the home network recorded in TESTING.md;
+  v0.2 release.
+
+### Who does what
+
+Claude writes all code, tests, documentation, commits and releases, runs the
+Mac-side tools, and installs builds on the Googlebook over Wi-Fi adb. Alex's
+part is what only a person at the devices, or the account owner, can do.
+
+| When | Claude | Alex |
+|---|---|---|
+| Before phase 0 | Sets up the packages and the `wc` helper | Grants Screen Recording and Accessibility to the terminal app when macOS asks; pairs Wireless debugging once with `./wc pair` |
+| Phase 0 | Builds and runs the probes, records every number | Puts another app in front during click tests; presses the keys of the keyboard matrix; takes the latency photos; for S3 installs Tailscale on the Mac and the Googlebook, signs both into one tailnet, enables MagicDNS, and puts the Googlebook on a phone hotspot |
+| M1 | Host foundation | Signs into Xcode with an Apple ID so a Personal Team certificate exists; approves the host's two permission prompts |
+| M2 to M5 | Client, catalog, sessions, input | Tries each milestone build on the Googlebook and says what feels wrong; types the pairing PIN; keeps the Mac awake during test sessions |
+| M6 | Hardening, CI, docs, v0.1 | Creates the Android release keystore in `~/.config/windowcast` and keeps a backup; approves the release notes |
+| M7 | Remote access code and docs, v0.2 | Keeps Tailscale signed in on both devices; sets the Mac's energy settings so it stays reachable (System Settings, Energy: prevent automatic sleeping when the display is off); runs one remote session from outside the home network and photographs the latency; optionally adds the Tailscale ACL |
 
 ### Phase 2 backlog
 
 Remote cursor shapes via `NSCursor.currentSystem`, the Mac menu bar as native
 Android menus built from the Accessibility menu tree, HEVC by default where it
-measures better, per-app audio, Tailscale documentation and STUN option,
-non-US base layouts through `UCKeyTranslate`, per-host keymap profiles and
+measures better, per-app audio, a signaling relay and TURN for people without
+Tailscale, ICE restart across network changes, non-US base layouts through
+`UCKeyTranslate`, per-host keymap profiles and
 separate left and right modifiers, relative mouse mode, "open all windows of
 this app", host auto-update.
 
-## 14. Risks and mitigations
+## 15. Risks and mitigations
 
 1. Screen Recording re-authorization prompts on macOS 15 and later stop
    capture silently. Mitigation: detect the stopped stream, notify on both
@@ -729,8 +831,19 @@ this app", host auto-update.
 13. Android cannot resize its own window after launch. Mitigation: size at
     launch from the Mac window, and offer the Mac-side Resize menu; S2 checks
     Android 17 for a new API.
+14. WebRTC over Tailscale is reported to fail in some setups when the VPN
+    interface's candidates are not gathered or selected. Mitigation: S3 logs
+    every candidate and the selected pair; if libwebrtc will not use the
+    `utun` candidates, the fallback is media relayed through the control
+    connection, designed in phase 2 rather than guessed now.
+15. A sleeping Mac is unreachable from the tailnet. Mitigation: the host's
+    sleep assertion during sessions, an energy-settings warning in the popover,
+    and the setup step in `docs/REMOTE.md`.
+16. Tailscale's Android client on Googlebook OS is untested. Mitigation: S3
+    installs it first; if it does not run, M7 falls back to a WireGuard
+    configuration on the Googlebook or moves to the relay design.
 
-## 15. Open items resolved by spikes, not by review
+## 16. Open items resolved by spikes, not by review
 
 - Units of `contentRect` when `sourceRect` is set (S1).
 - Whether `updateConfiguration` for `sourceRect` alone is cheap at 10 Hz (S1).
@@ -739,8 +852,12 @@ this app", host auto-update.
 - Whether the Googlebook trackpad reports two-finger scroll as touchpad or
   mouse source (S2).
 - Whether Android 17 exposes an app-initiated window resize (S2).
+- Whether libwebrtc gathers and selects the Tailscale `utun` candidates on both
+  platforms, and what a direct versus relayed tailnet path costs in latency and
+  bitrate (S3).
+- Whether Tailscale's Android app runs on Googlebook OS (S3).
 
-## 16. References
+## 17. References
 
 - ScreenCaptureKit: Apple docs and WWDC22 sessions 10155 and 10156; WWDC24
   10088 for the content sharing picker.
@@ -751,6 +868,9 @@ this app", host auto-update.
   `rtp_video_stream_receiver2.cc`.
 - Android desktop windowing, multi-instance, local network permission and
   foreground service types: developer.android.com guides for Android 16 and 17.
+- Tailscale: Android install and app-based split tunneling docs
+  (tailscale.com/docs); libwebrtc `rtc_base/network.cc` classifies `utun*` as
+  `ADAPTER_TYPE_VPN` and gathers it unless `ignoreVPNNetworkAdapter` is set.
 - Googlebook field notes: `kuscher/vscodebook` docs/GOOGLEBOOK.md; helper
   script and build conventions from `kuscher/studiosnap` and `kuscher/officebook`.
 - Prior art examined and rejected as bases: RustDesk (CGDisplayStream capture,

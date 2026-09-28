@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Answer the questions the spec leaves to spikes S1 and S2 with measured numbers and behavior tables, so the phase 1 plan is written on facts: how ScreenCaptureKit's app-filtered crop behaves, what unit `contentRect` uses, whether raise-and-click works from a background process, and what latency, frame rate and keyboard behavior a WebRTC stream to the Googlebook really gets.
+**Goal:** Answer the questions the spec leaves to spikes S1, S2 and S3 with measured numbers and behavior tables, so the phase 1 plan is written on facts: how ScreenCaptureKit's app-filtered crop behaves, what unit `contentRect` uses, whether raise-and-click works from a background process, what latency, frame rate and keyboard behavior a WebRTC stream to the Googlebook really gets, and whether the same stream works over Tailscale from outside the home network.
 
 **Architecture:** Two throwaway programs. `spikes/macprobe` is a SwiftPM package with a library `ProbeKit` (capture, geometry, tracking, Accessibility, input injection), a CLI `captureprobe` (S1 experiments), a library `ProbeRTC` (WebSocket signaling, encoder factory) and a CLI `webrtcprobe` (S2 host). `spikes/webrtcprobe-android` is a small Kotlin/Compose app that renders the stream in one or three desktop windows and logs input events, stats and permission behavior. Findings go into `docs/superpowers/spikes/2026-09-27-phase0-findings.md`; the code is deleted at the end of phase 0 and lives on in git history.
 
 **Tech Stack:** Swift 6.4 toolchain (Swift 5 language mode), SwiftPM, ScreenCaptureKit, CoreGraphics events, Accessibility API, Network.framework WebSocket, libwebrtc `webrtc-sdk/Specs` 150.7871.01; Kotlin 2.4.20, AGP 9.4.1, Gradle 9.8.0, compileSdk 37, Compose BOM 2026.09.00, OkHttp 5.5.0, `io.github.webrtc-sdk:android:150.7871.01`.
 
-**Spec:** `docs/superpowers/specs/2026-09-27-windowcast-design.md` (sections 4.5 to 4.8, 7, 10, 13 "Phase 0", 15).
+**Spec:** `docs/superpowers/specs/2026-09-27-windowcast-design.md` (sections 4.5 to 4.8, 7, 10, 11, 14 "Phase 0" and "Who does what", 16).
 
 ## Global Constraints
 
@@ -30,6 +30,25 @@
 3. Screen Recording denied or revoked: the tools must print what to enable instead of a bare error code. Pinned by the denial check in Task 2 step 6.
 4. Red content elsewhere in the frame or no marker at all: the self-test must report "NEITHER" rather than pass on a wrong centroid. Pinned by `testIgnoresDarkRedAndReportsNilWhenAbsent` in Task 4.
 5. The Android app dies mid-stream: the host must stop capturing that session within seconds instead of streaming into a closed socket forever. Pinned by Task 9 step 9.
+
+---
+
+## Who does what
+
+Claude runs every step below unless the step says **Alex:**. Those steps need a person at the devices or the owner of an account. They are collected here so a session can be planned; each also appears inline in its task.
+
+| Task | Alex |
+|---|---|
+| 2 | Grant Screen Recording to the terminal app when macOS asks (step 4); briefly revoke and restore it for the denial check (step 6). |
+| 4 | Nothing; the self-test drives its own window. |
+| 5 | Grant Accessibility when asked (step 3); during each `poke`, click another app within 3 s so the target is behind it (steps 4 and 5); watch where the click lands. |
+| 6 | Start a video in Safari and in Chrome and `top -s 0` in Terminal so three windows animate. |
+| 8 | On the Googlebook: turn on Wireless debugging and read out the pairing code (step 2); tap the permission and window buttons (step 7). |
+| 9 | Enter the Mac's IP on the Googlebook; move the mouse, scroll with the trackpad and a mouse, press each key of the keyboard matrix with capture on and off (steps 5 to 7); open Safari's menus on the Mac (step 8). |
+| 10 | Install Tailscale on the Mac (App Store) and on the Googlebook (Play Store), sign both into one tailnet, enable MagicDNS in the admin console (step 1); put the Googlebook on a phone hotspot (step 5); turn the Googlebook's Wi-Fi on and off during a stream (step 6). |
+| 11 | Take 10 burst photos per configuration with a phone, Mac timer and Googlebook side by side (steps 1 and 2); quit and reopen the probe app when a switch changes (steps 1 and 2). |
+
+Everything else, including builds, installs over Wi-Fi adb, log reading, filling the findings file and the commits, is Claude's.
 
 ---
 
@@ -441,6 +460,34 @@ the last section.
 - Searched SDK 37 for:
 - Result:
 
+## S3 remote access over Tailscale
+
+### Setup
+
+- Tailscale versions (Mac, Googlebook) and whether the Android app runs on Googlebook OS:
+- Mac tailnet address and MagicDNS name:
+- Googlebook network during the remote runs (carrier, hotspot device):
+
+### Candidates and selected pair
+
+| Run | Host local candidates (types, addresses) | Client local candidates | Selected pair (local -> remote, networkType) | `tailscale status`: direct or relay |
+|---|---|---|---|---|
+| Googlebook on home Wi-Fi, connecting to the 100.x address | | | | |
+| Googlebook on phone hotspot | | | | |
+
+### Remote numbers (phone hotspot, timer window)
+
+| Configuration | connect time s | median latency ms | min | max | fps | target Mbps | jitter buffer ms/frame | ICE RTT ms |
+|---|---|---|---|---|---|---|---|---|
+| 40 Mbps cap, 60 fps (defaults) | | | | | | | | |
+| 12 Mbps cap, 30 fps (proposed remote default) | | | | | | | | |
+| relayed path (if a relay was observed) | | | | | | | | |
+
+### Network switch mid-stream
+
+- Wi-Fi turned back on during a hotspot stream: what happened, after how many seconds:
+- Reconnect by reopening the window worked:
+
 ## Decisions for phase 1
 
 - Capture filter for window sessions:
@@ -448,6 +495,7 @@ the last section.
 - Codec, level and decoder factory:
 - Field trials:
 - Keyboard capture default and Esc handling:
+- Remote defaults for M7 (cap, fps, connect timeout) and whether Tailscale is confirmed as the path:
 - Anything that changes the spec:
 - Spike code commit:
 ```
@@ -3330,6 +3378,8 @@ Run the host with `--windows SAFARI_ID` instead of `--timer`, open Safari's File
 With a stream running, force-stop the app: `./wc adb shell am force-stop io.github.kuscher.windowcast.spike`.
 Expected: within 10 s the host prints `closing: signaling closed` (or `ice ...`) followed by `capture stopped`, and the timer window keeps running normally. If the host keeps printing `capture N fps` lines for that session, the close path is broken and must be fixed before Task 10.
 
+**Alex** in this task: enters the IP (step 5), moves the mouse and scrolls (step 6), presses the keys (step 7) and opens the Safari menus (step 8).
+
 - [ ] **Step 10: Commit**
 
 ```bash
@@ -3340,7 +3390,110 @@ git push
 
 ---
 
-### Task 10: Measurements, decisions, cleanup
+### Task 10: S3, the same stream over Tailscale from outside the home network
+
+**Files:**
+- Modify: `spikes/macprobe/Sources/webrtcprobe/PeerSession.swift` (log local candidates and the selected pair)
+- Modify: `spikes/webrtcprobe-android/app/src/main/java/io/github/kuscher/windowcast/spike/StreamActivity.kt` (same on the client)
+- Modify: `docs/superpowers/spikes/2026-09-27-phase0-findings.md` (section "S3")
+
+**Interfaces:**
+- Consumes: everything from Tasks 7 to 9; the `--mbps`, `--fps` and `--timer` options of `webrtcprobe`.
+- Produces: log lines `local candidate ...` on both ends and `pair <local> -> <remote>` in both stats outputs; the S3 tables in the findings file.
+
+- [ ] **Step 1: Alex: install and join Tailscale on both devices**
+
+**Alex:** install Tailscale from the Mac App Store and from the Play Store on the Googlebook, sign both in to the same tailnet, and turn on MagicDNS in the Tailscale admin console (DNS tab). Leave the Googlebook on the home Wi-Fi for now.
+
+Verify from the Mac:
+
+```bash
+/Applications/Tailscale.app/Contents/MacOS/Tailscale status
+/Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4
+```
+
+Expected: the Googlebook appears in the status list with a `100.x.y.z` address, and the second command prints the Mac's own `100.x.y.z`. Write both into the S3 "Setup" lines of the findings file, with the app versions shown in each app's settings.
+
+- [ ] **Step 2: Log candidates and the selected pair on the host**
+
+In `PeerSession.swift`, replace the `didGenerate` delegate method with:
+
+```swift
+    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        log("local candidate \(candidate.sdp)")
+        signaling.send(["type": "ice", "candidate": candidate.sdp, "sdpMid": candidate.sdpMid ?? "", "sdpMLineIndex": Int(candidate.sdpMLineIndex)])
+    }
+```
+
+In `printStats()`, replace the `candidate-pair` loop with:
+
+```swift
+            var candidates: [String: String] = [:]
+            for (_, s) in report.statistics where s.type == "local-candidate" || s.type == "remote-candidate" {
+                let v = s.values
+                candidates[s.id] = "\(v["address"] ?? "?"):\(v["port"] ?? "?") \(v["candidateType"] ?? "?") \(v["networkType"] ?? "")"
+            }
+            for (_, s) in report.statistics where s.type == "candidate-pair" && (s.values["nominated"] as? NSNumber)?.boolValue == true {
+                let rtt = ((s.values["currentRoundTripTime"] as? NSNumber)?.doubleValue ?? 0) * 1000
+                let local = candidates[(s.values["localCandidateId"] as? String) ?? ""] ?? "?"
+                let remote = candidates[(s.values["remoteCandidateId"] as? String) ?? ""] ?? "?"
+                line += " | rtt \(String(format: "%.1f", rtt)) ms pair \(local) -> \(remote)"
+            }
+```
+
+- [ ] **Step 3: Log candidates and the selected pair on the client**
+
+In `StreamActivity.kt`, change `onIceCandidate` to log before sending:
+
+```kotlin
+            override fun onIceCandidate(c: IceCandidate) {
+                Log.i(TAG, "local candidate ${c.sdp}")
+                signaling?.send(JSONObject().put("type", "ice").put("candidate", c.sdp).put("sdpMid", c.sdpMid).put("sdpMLineIndex", c.sdpMLineIndex))
+            }
+```
+
+and replace the `candidate-pair` block inside `statsTick` with:
+
+```kotlin
+                val candidates = report.statsMap.values
+                    .filter { it.type == "local-candidate" || it.type == "remote-candidate" }
+                    .associate { it.id to "${it.members["address"]}:${it.members["port"]} ${it.members["candidateType"]} ${it.members["networkType"] ?: ""}" }
+                report.statsMap.values.filter { it.type == "candidate-pair" && it.members["nominated"] == true }.forEach {
+                    val rtt = ((it.members["currentRoundTripTime"] as? Number)?.toDouble() ?: 0.0) * 1000
+                    line += "\nice rtt %.1f ms".format(rtt)
+                    line += "\npair ${candidates[it.members["localCandidateId"]]} -> ${candidates[it.members["remoteCandidateId"]]}"
+                }
+```
+
+Build both: `swift build --package-path spikes/macprobe 2>&1 | tail -1` and `./wc spike-app 2>&1 | tail -2`. Expected: `Build complete!` and `BUILD SUCCESSFUL`.
+
+- [ ] **Step 4: Tailnet path while still on the home Wi-Fi**
+
+Host: `swift run --package-path spikes/macprobe webrtcprobe --timer`. On the Googlebook enter the Mac's `100.x.y.z` address instead of the LAN IP and open one stream window.
+Expected: the stream connects; the host log shows `local candidate` lines that include the `100.x` address; the overlay's `pair` line shows `100.x` on both sides, or two `192.168.x` addresses if libwebrtc preferred the LAN while both were reachable, which is itself a finding. Record the first row of "Candidates and selected pair", and what `/Applications/Tailscale.app/Contents/MacOS/Tailscale status` says on the Googlebook's line (`direct` or `relay`).
+
+- [ ] **Step 5: Alex: leave the home network**
+
+**Alex:** turn on a phone hotspot, connect the Googlebook to it, and confirm the Tailscale app on the Googlebook still shows Connected. Then open one stream window against the same `100.x` address.
+Expected: the window connects within a few seconds (write the time from tapping to the first frame into "connect time"); the `pair` line shows `100.x` on both sides; `Tailscale status` says whether the path is `direct` or `relay "<code>"`. Measure latency as in Task 11 step 1 (**Alex:** 10 burst photos) and copy the overlay's fps, the host line's target Mbps, the jitter buffer and ICE RTT into the "40 Mbps cap, 60 fps" row. Then restart the host with `--mbps 12 --fps 30` and fill the second row. If the path was direct, write "not observed" in the relayed row; if it was relayed, write that in the notes and keep both rows.
+
+- [ ] **Step 6: Alex: switch networks mid-stream**
+
+With a stream running over the hotspot, **Alex:** turn the Googlebook's Wi-Fi on so it rejoins the home network, then off again after a minute. Record after how many seconds the picture froze, what the overlay and `./wc spike-logs` reported (`ice DISCONNECTED`, `FAILED`), and whether closing and reopening the stream window reconnected.
+
+- [ ] **Step 7: Record and commit**
+
+Fill the S3 section and the remote-defaults line under "Decisions for phase 1". Then:
+
+```bash
+git add spikes docs/superpowers/spikes
+git commit -m "spike: S3 measures the WebRTC stream over Tailscale from outside the home network"
+git push
+```
+
+---
+
+### Task 11: Measurements, decisions, cleanup
 
 **Files:**
 - Modify: `docs/superpowers/spikes/2026-09-27-phase0-findings.md` (fill every table)
@@ -3351,7 +3504,7 @@ git push
 
 - [ ] **Step 1: Latency, configuration A**
 
-Host: `swift run --package-path spikes/macprobe webrtcprobe --timer`. Client: switches "playout-delay 0/0" and "level 5.2" both on (quit and reopen the app if they were changed), open 1 stream window, drag it next to the Mac's timer window so both are visible from one spot. Take 10 photos with a phone in burst mode; for each, latency = Mac digits minus Googlebook digits. Write median, min and max into row A, plus the overlay's `jitterBuf`, `decode`, `ice rtt` and `dc rtt` values read while streaming.
+Host: `swift run --package-path spikes/macprobe webrtcprobe --timer`. Client: switches "playout-delay 0/0" and "level 5.2" both on (quit and reopen the app if they were changed), open 1 stream window, drag it next to the Mac's timer window so both are visible from one spot. **Alex:** take 10 photos with a phone in burst mode; for each, latency = Mac digits minus Googlebook digits. Write median, min and max into row A, plus the overlay's `jitterBuf`, `decode`, `ice rtt` and `dc rtt` values read while streaming.
 
 - [ ] **Step 2: Configurations B, C, D**
 
@@ -3387,6 +3540,9 @@ Fill the last section of the findings file with one line per item, derived from 
 - Field trials: keep 0/0 if row A beats row B; otherwise the values to use.
 - Keyboard capture default and Esc handling: from the matrix.
 - Activation and resize fallbacks per app: from the S1 tables.
+- Remote access: Tailscale confirmed or not, the M7 defaults (cap, fps, connect
+  timeout) from the S3 rows, and whether the network-switch behavior needs
+  more than the planned reconnect.
 - Anything that changes the spec, listed explicitly (for example "S2 found X, so section 4.7 changes to Y"); an empty list is written as "none".
 
 - [ ] **Step 7: Remove the spike code**
