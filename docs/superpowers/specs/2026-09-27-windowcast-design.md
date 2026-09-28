@@ -1,10 +1,11 @@
 # Windowcast design
 
-Date: 2026-09-27. Status: draft for review. Author: Alex Kuscher with Claude.
+Date: 2026-09-27, revised the same day to bring multi-window, the Resize menu and
+key remapping into v1. Status: draft for review. Author: Alex Kuscher with Claude.
 
-Windowcast streams one macOS window, or a whole display, from a Mac Studio to a
-Googlebook, where it appears as an ordinary resizable Android window that you
-control with the Googlebook's keyboard, trackpad and mouse. It is two small
+Windowcast streams macOS windows, or a whole display, from a Mac Studio to a
+Googlebook, where each one appears as an ordinary resizable Android window that
+you control with the Googlebook's keyboard, trackpad and mouse. It is two small
 native programs: a Swift menu-bar **host** on the Mac and a Kotlin/Jetpack
 Compose **client** on Android, joined by WebRTC on the local network.
 
@@ -13,24 +14,31 @@ Compose **client** on Android, joined by WebRTC on the local network.
 ### Goals (v1)
 
 1. Pick, from the Googlebook, any window on the Mac Studio (grouped by app, with
-   live thumbnails) or any display, and stream it into one Android window.
-2. Control it: mouse, trackpad scrolling, right and middle click, physical
+   live thumbnails) or any display, and stream it into an Android window.
+2. Several at once: each Mac window you open becomes its own Android window with
+   its own taskbar entry, and you switch between them like local apps.
+3. Control them: mouse, trackpad scrolling, right and middle click, physical
    keyboard including Mac shortcuts, and text clipboard in both directions.
-3. Feel local for productivity work: 60 fps, glass-to-glass latency around
+4. Remap keys in the app: choose what Ctrl, Alt, Meta and Caps Lock send to the
+   Mac, and add your own key-to-key rules, from day one.
+5. Resize from the Android side: every session window has a Resize menu that
+   matches the Mac window to the Android window once, keeps it following as you
+   resize, or sets a preset size.
+6. Feel local for productivity work: 60 fps, glass-to-glass latency around
    60 ms on home Wi-Fi, text readable at the Googlebook's native pixels.
-4. Follow the window: the stream tracks moves and resizes, pauses when the
+7. Follow the window: the stream tracks moves and resizes, pauses when the
    window is minimized, and ends cleanly when it closes.
-5. Pair once with a PIN, then reconnect with one click. Nothing leaves the LAN.
-6. Build and install from the Mac with one helper script; release an APK and a
+8. Pair once with a PIN, then reconnect with one click. Nothing leaves the LAN.
+9. Build and install from the Mac with one helper script; release an APK and a
    host app zip on GitHub.
 
 ### Non-goals (v1)
 
-Audio, file transfer, several simultaneous sessions, other host platforms,
-internet relay servers, non-US keyboard layouts beyond a text fallback,
-remote cursor shapes, HDR, touch-first gestures, unattended access to the
-login window, and resizing the Mac window automatically on every Android
-resize. Section 13 lists which of these are planned for phase 2.
+Audio, file transfer, other host platforms, internet relay servers, non-US
+base keyboard layouts (remap rules and the text fallback cover individual
+keys), remote cursor shapes, HDR, touch-first gestures, unattended access to
+the login window, per-host keymap profiles, and two clients controlling the
+same window. Section 13 lists which of these are planned for phase 2.
 
 ## 2. Context and constraints
 
@@ -52,8 +60,8 @@ loses its Screen Recording and Accessibility grants.
 - No open-source remote desktop streams a single macOS window with control.
   RustDesk captures displays through the obsoleted CGDisplayStream API and its
   protocol has no window concept. Sunshine's macOS host is experimental with a
-  fixed per-session resolution. Both were rejected as bases; section 16 lists the
-  prior art examined.
+  fixed per-session resolution. Both were rejected as bases; section 16 lists
+  the prior art examined.
 - ScreenCaptureKit's single-window filter (`desktopIndependentWindow`) omits the
   app's menus, popovers, sheets and dialogs. A display filter that includes
   only the target app, cropped with `sourceRect`, keeps them and still renders
@@ -75,9 +83,13 @@ loses its Screen Recording and Accessibility grants.
   turn off the receiver's jitter buffer wait.
 - Android 17 at targetSdk 37 needs the runtime `ACCESS_LOCAL_NETWORK`
   permission for any LAN traffic and mDNS. Desktop windowing ignores
-  orientation and resizability locks. `setKeyboardCaptureEnabled` with the
-  normal permission `CAPTURE_KEYBOARD` lets a window receive Alt+Tab and Meta
-  shortcuts. A `connectedDevice` foreground service has no time limit.
+  orientation and resizability locks. Every task is a window: launching an
+  activity with `FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK`
+  opens a new window, `ActivityOptions.setLaunchBounds` sizes it at launch,
+  and no public API resizes an existing window afterwards.
+  `setKeyboardCaptureEnabled` with the normal permission `CAPTURE_KEYBOARD`
+  lets a window receive Alt+Tab and Meta shortcuts. A `connectedDevice`
+  foreground service has no time limit.
 
 ## 3. Architecture
 
@@ -88,23 +100,31 @@ loses its Screen Recording and Accessibility grants.
  |                                         |        |                                    |
  |  Discovery  Bonjour _windowcast._tcp ---|------->|  NsdManager discovery              |
  |  Control    WSS (TLS, self-signed) <----|--------|  OkHttp WebSocket, pinned cert     |
- |    pairing, catalog, thumbnails,        |        |    Hosts / Pair / Picker screens   |
+ |    pairing, catalog, thumbnails,        |        |    Hosts / Pair / Picker window    |
  |    session control, SDP + ICE, clipboard|        |                                    |
  |                                         |        |                                    |
- |  Capture    ScreenCaptureKit stream     |        |  Session screen                    |
- |    app-filtered display crop / display  |        |    SurfaceViewRenderer (MediaCodec)|
- |  Streaming  libwebrtc video track  =====|=DTLS==>|  libwebrtc PeerConnection          |
- |    VideoToolbox H.264 / HEVC            |        |                                    |
- |  Input      data channels <=============|========|  keyboard, mouse, trackpad capture |
- |    AX raise + CGEvent HID tap           |        |  foreground service (connectedDevice)|
- |  Tracker    CGWindowList poll 10 Hz     |        |                                    |
+ |  Sessions   one per window or display   |        |  Session windows, 1 per Mac window |
+ |    Capture  ScreenCaptureKit stream     |        |    SurfaceViewRenderer (MediaCodec)|
+ |    Stream   libwebrtc video track  =====|=DTLS==>|    libwebrtc PeerConnection        |
+ |    VideoToolbox H.264 / HEVC            |        |    keyboard, mouse, trackpad,      |
+ |    Input    data channels <=============|========|      Resize menu, key remap        |
+ |  Injector   AX raise + CGEvent HID tap  |        |  SessionRegistry in a foreground   |
+ |  Tracker    CGWindowList poll 10 Hz     |        |    service (connectedDevice)       |
  +-----------------------------------------+        +------------------------------------+
 ```
 
-One control connection per client; one session per connection in v1. The host is
-the WebRTC offerer and owns the data channels. ICE uses host candidates only
-(no STUN or TURN); Tailscale addresses are ordinary host candidates, which is
-the intended path to remote use later.
+One control connection per client carries all of that client's sessions, up to
+six at once. Each session (one Mac window or display) has its own peer
+connection, video track and data channels, so a failing session never disturbs
+the others and each Android window owns exactly one. The host is the WebRTC
+offerer. ICE uses host candidates only (no STUN or TURN); Tailscale addresses
+are ordinary host candidates, which is the intended path to remote use later.
+
+Keyboard translation happens on the client: it knows the physical keyboard and
+the user's remap rules, and sends the Mac virtual key and modifier flags to
+post. The host injects exactly what it is told and keeps one global picture of
+which keys and buttons are down, because there is one physical keyboard and
+mouse behind all sessions.
 
 ## 4. Mac host
 
@@ -114,19 +134,21 @@ macOS 15 so GitHub runners can build it; developed and tested on macOS 26.
 
 ### 4.1 App shell and permissions
 
-- SwiftUI `MenuBarExtra` popover with: status line ("Idle" or "Streaming Safari
-  to Alex's Googlebook"), two permission rows with green/red dots and buttons
-  that open the System Settings panes, the paired devices list with revoke,
-  and Settings (host name, port, launch at login via `SMAppService`) and Quit.
-  Codec, bitrate and modifier choices are made on the client, per host.
+- SwiftUI `MenuBarExtra` popover with: a status line ("Idle" or "3 windows to
+  Alex's Googlebook") and the list of active sessions with their targets, two
+  permission rows with green/red dots and buttons that open the System
+  Settings panes, the paired devices list with revoke, and Settings (host
+  name, port, launch at login via `SMAppService`, session limit) and Quit.
+  Codec, bitrate, resize-follow and keyboard choices are made on the client.
 - Screen Recording is requested by calling `SCShareableContent` once;
   Accessibility by `AXIsProcessTrustedWithOptions` with the prompt option.
   Status is polled every 2 s while the popover is open.
 - A pairing panel: a floating window showing the six-digit PIN and the
   requesting client's name, dismissed on success, failure or after 60 s. A
   user notification is posted as well.
-- While a session runs, the menu-bar icon changes and the first frame posts a
-  notification naming the client, so the Mac's user always knows.
+- While any session runs, the menu-bar icon changes, and the first frame of a
+  client's first session posts a notification naming the client, so the Mac's
+  user always knows.
 
 ### 4.2 Identity, discovery and control server
 
@@ -139,7 +161,8 @@ macOS 15 so GitHub runners can build it; developed and tested on macOS 26.
   `NWProtocolWebSocket`, bound to all interfaces. The listener advertises
   itself as `_windowcast._tcp` with the computer name and a TXT record
   `v=1 id=<hostId> fp=<first 8 hex of the certificate SHA-256>`.
-- Messages are JSON text frames (section 7). Thumbnails are binary frames.
+- Messages are JSON text frames (section 6). Thumbnails and icons are binary
+  frames.
 - Unauthenticated connections may only send `hello`, `pairRequest`,
   `pairProof` and `ping`; anything else closes the connection.
 
@@ -166,18 +189,20 @@ macOS 15 so GitHub runners can build it; developed and tested on macOS 26.
   windows at least 100x50 points with a non-nil owning app, excluding the host
   itself and a small system deny-list (Dock, Window Manager, Control Center,
   Notification Center). Windows are grouped by app, apps sorted by name,
-  windows by title; each carries `isOnScreen`.
+  windows by title; each carries `isOnScreen` and `busy` (already streamed by
+  another client).
 - Displays come from `SCShareableContent.displays` with names from `NSScreen`.
 - Thumbnails: `SCScreenshotManager` with a single-window filter (or display
   filter), at most 480 px wide, JPEG quality 0.7. Off-screen windows that
   yield no image fall back to the app icon. App icons (64 px PNG) are sent
-  once per app. Thumbnails refresh every 2 s only while a client has
-  subscribed; `contentChanged` pushes are throttled to 1 Hz.
+  once per app and reused by the client for its window task icons.
+  Thumbnails refresh every 2 s only while a client has subscribed;
+  `contentChanged` pushes are throttled to 1 Hz.
 
 ### 4.5 Capture engine
 
-Two modes, one `CaptureEngine` class with an `SCStreamOutput` on a dedicated
-serial queue.
+Two modes, one `CaptureEngine` instance per session with an `SCStreamOutput` on
+its own serial queue.
 
 - Window mode: `SCContentFilter(display: d, including: [owningApp],
   exceptingWindows: [])` where d is the display containing the window's
@@ -190,7 +215,7 @@ serial queue.
   `showsCursor` false (the client draws its own pointer), `capturesAudio`
   false, `width`/`height` from the output size policy in section 4.6.
 - Frame path: each `CMSampleBuffer` with status `.complete` is wrapped as
-  `RTCCVPixelBuffer` and handed to the WebRTC video source with its
+  `RTCCVPixelBuffer` and handed to the session's WebRTC video source with its
   presentation timestamp. Frames are never copied. The engine never holds more
   than one buffer beyond the current one: the last frame is retained and
   re-sent at 2 fps while the source is static so keyframe requests after loss
@@ -203,11 +228,12 @@ serial queue.
 
 ### 4.6 Window tracker and output size policy
 
-- A 100 ms timer reads `CGWindowListCopyWindowInfo` for the target window id:
-  bounds, on-screen flag and owner. Missing entry means closed: the session
-  ends with reason `windowClosed`.
-- Bounds change: update `sourceRect` at once (at most 10 Hz). Display change
-  (center moved to another display): rebuild the filter for the new display.
+- A 100 ms timer per window session reads `CGWindowListCopyWindowInfo` for the
+  target window id: bounds, on-screen flag and owner. Missing entry means
+  closed: the session ends with reason `windowClosed`.
+- Bounds change: update `sourceRect` at once (at most 10 Hz) and push
+  `sourceChanged`. Display change (center moved to another display): rebuild
+  the filter for the new display. Title change: push `targetInfo`.
 - On-screen false while the app is not hidden: the session enters `paused`
   with reason `minimized`; the client offers Restore, which the host performs
   through Accessibility (`kAXMinimizedAttribute` false) followed by a raise.
@@ -221,67 +247,81 @@ serial queue.
   dimension changes by more than 2 percent or the aspect ratio changes.
   During a live resize the fixed output shows the content letterboxed for at
   most 300 ms; there is no distortion because `preservesAspectRatio` stays on.
+- `resizeTarget` sets the window's Accessibility size to the requested points,
+  clamped to the display's visible frame, at most 5 times per second; apps
+  that enforce minimum or fixed sizes simply end up at their nearest allowed
+  size, which the tracker reports back. This backs the client's Resize menu,
+  including its follow mode.
 
 ### 4.7 Streaming
 
 - libwebrtc from `webrtc-sdk/Specs` 150.7871.01 via Swift Package Manager.
   Field trial `WebRTC-ForceSendPlayoutDelay/min_ms:0,max_ms:0/` is set before
-  the factory is created.
-- Video source: `videoSourceForScreenCast(true)` so degradation preference is
-  maintain-resolution. One send-only transceiver, track id `video0`.
+  the single factory is created.
+- Each session owns one peer connection with a screencast video source
+  (`videoSourceForScreenCast(true)`, so degradation preference is
+  maintain-resolution) and one send-only transceiver, track id `video0`.
 - Encoder factory: a custom `RTCVideoEncoderFactory` that offers H.264 High
   profile level 5.2 first, constrained baseline second, and HEVC Main when the
   session preference allows it. The default factory's level 3.1 would cap
   the frame rate at high resolutions.
-- Bitrate: after negotiation, `setBweMinBitrateBps` with min 2 Mbps, start
-  15 Mbps, max 40 Mbps; the encoding parameters carry the same bounds and
-  `maxFramerate` 60. The client's settings can lower the cap.
+- Bitrate per session: after negotiation, `setBweMinBitrateBps` with min
+  2 Mbps, start 15 Mbps, max 40 Mbps; the encoding parameters carry the same
+  bounds and `maxFramerate` 60. The client's per-host cap lowers the maximum,
+  and with more than two sessions the host divides the cap evenly.
 - Peer connection: unified plan, `bundlePolicy` max-bundle, no ICE servers,
   continual gathering. The host creates the offer and two data channels:
   `input` (ordered, reliable) and `pointer` (unordered, `maxRetransmits` 0).
-  SDP and ICE candidates travel over the control connection.
+  SDP and ICE candidates travel over the control connection tagged with the
+  session id.
 
 ### 4.8 Input injection
 
-`InputInjector` runs on the main thread. Data-channel bytes are decoded on the
-WebRTC thread and dispatched to it.
+One `InputInjector` for the whole host, running on the main thread. Each
+session decodes its data-channel bytes on the WebRTC thread and hands them to
+the injector with the session's target and geometry.
 
 - Frontmost guarantee: on session start, and on any button-down or key-down
-  when a check older than 250 ms shows the target is not frontmost, the host
-  sets `kAXFrontmostAttribute` on the app element, performs `kAXRaiseAction`
-  on the window element (matched by title and frame among
+  when a check older than 250 ms shows the session's target is not frontmost,
+  the injector sets `kAXFrontmostAttribute` on the app element, performs
+  `kAXRaiseAction` on the window element (matched by title and frame among
   `kAXWindowsAttribute`) and sets `kAXMainAttribute`. If Accessibility
-  reports failure it falls back to `NSRunningApplication.activate`. Display
-  mode skips all of this.
+  reports failure it falls back to `NSRunningApplication.activate`. Pointer
+  moves never raise, so hovering across two session windows does not make the
+  Mac windows fight. Display mode skips all of this.
 - Mouse: `CGEvent` mouse events posted to the HID tap at the mapped global
-  point (section 8). Moves become dragged events while a button is held.
+  point (section 7). Moves become dragged events while a button is held.
   Click count is computed from `NSEvent.doubleClickInterval` and a 4-point
-  radius. Buttons 3 and 4 map to back and forward.
+  radius. Buttons 3 and 4 map to back and forward. Mouse events carry the
+  modifier flags currently held according to the global key state.
 - Scroll: trackpad deltas use pixel units with the continuous flag and
   synthesized phases (began after a 100 ms gap, ended after 100 ms idle);
   mouse wheel notches use line units.
-- Keyboard: Android key codes map to macOS virtual key codes through the table
-  in section 9, with the modifier policy applied. Every key down and up,
-  including modifiers, is posted; the event flags are set from the host's
-  tracked modifier state. Repeats set the autorepeat flag. `text` messages
-  post a key event with the Unicode string attached, for IME commits and
-  characters without a US key.
-- `releaseAll` posts key-up for every key and button the host believes is
-  down. The client sends it whenever its window loses focus, so no modifier
-  sticks on the Mac.
-- Clipboard: while a session runs the host polls `NSPasteboard.general`'s
-  change count every 500 ms and sends string contents up to 1 MB; incoming
-  `setClipboard` writes the pasteboard. A hash of the last value sent or
-  received prevents loops.
-- `resizeTarget` sets the window's Accessibility size to the requested points
-  (clamped to the display), which the tracker then picks up. This backs the
-  client's "Match size" button.
+- Keyboard: the client sends Mac virtual key codes and Mac modifier flags
+  already translated (section 8). The injector posts `CGEvent` keyboard events
+  with those flags, tracks the set of virtual keys down across all sessions,
+  and marks repeats with the autorepeat flag. A record with no virtual key but
+  a Unicode code point, or a `text` record, posts a key event carrying the
+  Unicode string, which is how IME commits and unmapped characters arrive.
+- `releaseAll` posts key-up for every key and button the injector believes is
+  down, regardless of which session sent it. The client sends it whenever a
+  session window loses focus, so no modifier sticks on the Mac.
+- Clipboard: per client connection. While any session runs the host polls
+  `NSPasteboard.general`'s change count every 500 ms and sends string
+  contents up to 1 MB; incoming `setClipboard` writes the pasteboard. A hash
+  of the last value sent or received prevents loops.
 
-### 4.9 Concurrency, errors and persistence
+### 4.9 Sessions, concurrency, errors and persistence
 
-- Swift 6 language mode. `ControlServer`, `ContentCatalog`, `PairingStore` and
-  `Session` are actors; `CaptureEngine` and `InputInjector` are classes bound
-  to their queues; WebRTC callbacks hop to the owning actor.
+- `SessionRegistry` (actor) owns all sessions: at most 6 per client and 8 in
+  total; a window or display can be in one session at a time across all
+  clients. `startSession` for a busy target returns error `busy`; over the
+  limit returns `limit`. When a client's connection drops, all its sessions
+  end with `transportFailed`.
+- Swift 6 language mode. `ControlServer`, `ContentCatalog`, `PairingStore`,
+  `SessionRegistry` and `Session` are actors; `CaptureEngine` and
+  `InputInjector` are classes bound to their queues; WebRTC callbacks hop to
+  the owning actor.
 - Every session end has a `SessionEndReason` (`clientStopped`,
   `windowClosed`, `permissionRevoked`, `hostStopped`, `transportFailed`,
   `error(String)`) that reaches the client in `sessionState`.
@@ -298,21 +338,47 @@ Kotlin 2.4.20, AGP 9.4.1, compileSdk and targetSdk 37, minSdk 34, Compose BOM
 2026.09.00 with material3 1.4.0 (stable, no Expressive alphas), Kotlin
 Serialization, DataStore, OkHttp 5 for WebSocket, and
 `io.github.webrtc-sdk:android:150.7871.01`. No dependency injection framework
-and no navigation library: a root `Screen` state in the app view model.
+and no navigation library: a root `Screen` state in the main view model.
 
-### 5.1 Manifest and window behavior
+### 5.1 Windows, manifest and process structure
 
+- Two activities. `MainActivity` is the launcher window with Hosts, Pair,
+  Picker and Settings. `SessionActivity` shows one session; it is declared
+  with `documentLaunchMode="always"` and an empty `taskAffinity`, and the
+  Picker starts it with `FLAG_ACTIVITY_NEW_DOCUMENT | FLAG_ACTIVITY_MULTIPLE_TASK`,
+  so every session is its own task and therefore its own desktop window with
+  its own taskbar entry. The Picker window stays open so you can add more.
+- Launch size: `ActivityOptions.setLaunchBounds` sizes the new window to the
+  Mac window's size in points, taken as dp one to one, clamped to 90 percent
+  of the display's work area with a minimum of 480x360 dp, and cascaded by
+  32 dp for each already-open session window. Android offers no API to
+  resize an existing window later, so this is the one moment the Android
+  window is sized to the Mac window; the Resize menu works the other way
+  round.
+- Each session window's task description carries the Mac window title and
+  the Mac app's icon, so the taskbar and overview show "Safari" with Safari's
+  icon rather than five identical Windowcast entries. Title changes update it.
+- `WindowcastSessionService` is a `connectedDevice` foreground service that
+  owns the process-wide `SessionRegistry`: one `ControlClient` per host
+  (shared by all windows), one `SessionEngine` per session, and the map from
+  target to session id and task id. It starts with the first session, shows
+  one notification ("2 windows from Mac Studio", with Disconnect all) and
+  stops with the last. Activities attach and detach from it, so covering,
+  recreating or reopening a window never interrupts a stream.
 - Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `CHANGE_WIFI_STATE`,
   `CHANGE_WIFI_MULTICAST_STATE`, `ACCESS_LOCAL_NETWORK` (runtime),
-  `CAPTURE_KEYBOARD`, `FOREGROUND_SERVICE`,
+  `CAPTURE_KEYBOARD`, `REORDER_TASKS` (to bring an already-open session
+  window to the front from the Picker), `FOREGROUND_SERVICE`,
   `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `POST_NOTIFICATIONS` (runtime,
   optional).
 - `uses-feature` `android.hardware.type.pc` and `android.hardware.touchscreen`
   both not required, the former so mouse events arrive untranslated.
-- Single activity, `resizeableActivity` true, `configChanges` covering size,
-  density, keyboard, navigation and UI mode so a resize never recreates it, and
-  a `layout` element with `minWidth` 480 dp, `minHeight` 360 dp,
-  `defaultWidth` 1100 dp, `defaultHeight` 720 dp.
+- Both activities set `resizeableActivity` true and `configChanges` covering
+  size, density, keyboard, navigation and UI mode so a resize never recreates
+  them. `MainActivity` declares a `layout` element with `minWidth` 480 dp,
+  `minHeight` 360 dp, `defaultWidth` 1100 dp, `defaultHeight` 720 dp and the
+  `PROPERTY_SUPPORTS_MULTI_INSTANCE_SYSTEM_UI` property, so its caption bar
+  offers a second Picker window.
 - The dev helper enables `ENABLE_FLUID_RESIZING` for the package so live
   resizing shows content instead of a veil.
 
@@ -320,20 +386,30 @@ and no navigation library: a root `Screen` state in the app view model.
 
 - Hosts: saved hosts with an online dot, then "Found on this network", and
   "Add by address" for IP or Tailscale names. A banner explains and requests
-  local network access when it is missing.
+  local network access when it is missing. A gear opens Settings.
 - Pair: the host name and a six-box PIN field; connects on the sixth digit.
 - Picker: a header with host name, search field and refresh; a horizontal
   Displays row of cards; Windows grouped under app icon and name in an
   adaptive grid (minimum 220 dp cells) of 16:10 thumbnail cards with title and
-  an "Off screen" badge. Thumbnails refresh every 2 s while visible. Arrow
-  keys and Enter work through Compose focus.
-- Session: full-bleed video, letterboxed with a dark background. A pill
-  toolbar at the top center appears on hover near the top edge or on tap and
-  hides after 2 s: window title and host, Match size, Fullscreen, Keyboard
-  capture toggle, Stats, Disconnect. Overlays: Connecting, Paused (window
-  minimized, Restore), Ended (reason, Back to windows), Reconnecting.
-- Settings sheet per host: modifier policy (Mac or Raw), frame rate cap
-  (60 or 30), bitrate cap, codec preference (Auto, H.264, HEVC), start in
+  badges: "Off screen", "Open" (this client already streams it; clicking
+  brings that window to the front) and "In use" (another client streams it).
+  Thumbnails refresh every 2 s while visible. Arrow keys and Enter work
+  through Compose focus.
+- Session window: full-bleed video, letterboxed with a dark background. A
+  pill toolbar at the top center appears on hover near the top edge or on tap
+  and hides after 2 s. Its items, in order: the window title and host; the
+  **Resize** menu (below); Keyboard capture toggle; Fullscreen; Stats;
+  Disconnect (closes this window). Overlays: Connecting, Paused (window
+  minimized, Restore), Ended (reason, Close), Reconnecting.
+- Resize menu: "Match this window" resizes the Mac window once to the video
+  area's size in points; "Follow this window" is a toggle that repeats that
+  on every Android resize (debounced 300 ms), so the letterbox disappears and
+  stays gone; presets 1280x800, 1440x900, 1680x1050, 1920x1200 and "Fill Mac
+  display" set the Mac window to that size. The follow toggle's default for
+  new sessions is a per-host setting. Display sessions show the menu disabled.
+- Settings: **Keyboard** (section 8: presets, the modifier map and custom
+  rules), and per host: frame rate cap (60 or 30), bitrate cap, codec
+  preference (Auto, H.264, HEVC), follow window size by default, start in
   fullscreen.
 
 ### 5.3 Discovery and connection
@@ -344,26 +420,23 @@ and no navigation library: a root `Screen` state in the app view model.
 - `ControlClient` wraps an OkHttp WebSocket over TLS with a trust manager that
   pins the paired fingerprint (or accepts and records it during pairing) and
   disables hostname verification. Requests are correlated by id with a 10 s
-  timeout; pushes go to a `SharedFlow`.
-- Disconnects during a session show Reconnecting and retry with backoff
-  (1, 2, 4, 8 s, up to 30 s) by starting a new session on the same target;
-  the host treats the old session as `transportFailed`.
+  timeout; pushes go to a `SharedFlow` that sessions filter by session id.
+- If the control connection drops, every open session window shows
+  Reconnecting; the registry reconnects with backoff (1, 2, 4, 8 s, up to
+  30 s) and restarts each session on its original target, keeping the Android
+  windows in place. The host treats the old sessions as `transportFailed`.
 
 ### 5.4 Session engine
 
-- `SessionEngine` owns the `PeerConnectionFactory` (field trial
+- One `PeerConnectionFactory` per process (field trial
   `WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:0/`, hardware decoder factory,
-  shared EGL context), the peer connection, the two data channels and stats
-  polling (1 Hz: frames decoded, fps, bitrate, RTT, jitter buffer delay).
+  shared EGL context). Each `SessionEngine` owns its peer connection, the two
+  data channels, and stats polling (1 Hz: frames decoded, fps, bitrate, RTT,
+  jitter buffer delay).
 - Rendering: `SurfaceViewRenderer` in an `AndroidView`, aspect-fit, hardware
   scaler on. The video area's size in device pixels is reported to the host as
-  the viewport, debounced 300 ms.
-- `WindowcastSessionService` is a `connectedDevice` foreground service started
-  when the session starts, with a notification that names the window and host
-  and offers Disconnect. It holds the engine so the session survives the
-  activity being covered or recreated.
-- The engine lives in a process-level `SessionHolder`; the activity attaches
-  and detaches its renderer.
+  the viewport, debounced 300 ms; in follow mode the same debounce also sends
+  `resizeTarget` with the size in points.
 
 ### 5.5 Input capture
 
@@ -376,22 +449,25 @@ and no navigation library: a root `Screen` state in the app view model.
   events outside it are ignored.
 - The local pointer stays visible over the video (default arrow) in v1.
 - Keyboard: a root `onPreviewKeyEvent` plus the activity's `dispatchKeyEvent`
-  forward every key down and up with the Android key code, meta state, repeat
-  count and Unicode character. Esc is consumed so it never becomes Back.
-  `setKeyboardCaptureEnabled(true)` (API 37 and later) is applied while the
-  session view is focused and the toolbar toggle is on (default on), so Alt+Tab and Meta
-  shortcuts go to the Mac; the exact Esc behavior with capture on is checked
-  in spike S2.
+  capture every key down and up in the focused session window and pass them
+  through `KeyTranslator` (section 8), which yields a Mac virtual key and
+  flags, a text fallback, or nothing. Esc is consumed so it never becomes
+  Back. `setKeyboardCaptureEnabled(true)` (API 37 and later) is applied while
+  the session view is focused and the toolbar toggle is on (default on), so
+  Alt+Tab and Meta shortcuts go to the Mac; the exact Esc behavior with
+  capture on is checked in spike S2.
 - IME commits arrive through `onCommitText` of a minimal `InputConnection` and
-  become `Text` messages.
+  become `Text` records.
 - Losing window focus sends `ReleaseAll`; regaining focus re-applies keyboard
-  capture.
+  capture. Only the focused session window forwards keys.
 
 ### 5.6 Persistence
 
 - `HostStore` (DataStore, JSON): host id, name, last address and port,
-  certificate fingerprint, settings. Tokens are wrapped by an Android Keystore
-  AES key and stored beside them.
+  certificate fingerprint, per-host settings. Tokens are wrapped by an Android
+  Keystore AES key and stored beside them.
+- `KeymapStore` (DataStore, JSON): the active preset, the modifier map and the
+  rule list; changes apply to open sessions immediately.
 - Logs use tag prefix `WC/`.
 
 ## 6. Cross-cutting: protocol summary
@@ -403,25 +479,28 @@ Details live in `protocol/PROTOCOL.md`; this is the contract.
   Binary frames carry a 4-byte big-endian header length, a JSON header and a
   payload (used for thumbnails and icons).
 - `protocolVersion` 1 in `hello` and `welcome`; a different major is refused
-  with `error` code `version`.
+  with `error` code `version`. Other error codes: `unauthorized`, `busy`,
+  `limit`, `notFound`, `permission`, `internal`.
 - Client to host: `hello`, `pairRequest`, `pairProof`, `listContent`,
   `subscribeContent`, `unsubscribeContent`, `getThumbnail`, `startSession`
   (target kind and id, viewport, preferences), `sdpAnswer`, `ice`,
   `updateViewport`, `restoreWindow`, `resizeTarget`, `setClipboard`,
-  `stopSession`, `ping`.
+  `stopSession`, `ping`. Every session message carries `sessionId`.
 - Host to client: `welcome`, `pairChallenge`, `pairResult`, `content`,
   `contentChanged`, thumbnail and icon binary frames, `sessionStarted`
-  (session id, source size and scale, title), `sdpOffer`, `ice`,
+  (session id, source size and scale, title, app), `sdpOffer`, `ice`,
   `sessionState` (capturing, paused, ended, with reason), `sourceChanged`,
-  `clipboard`, `error`, `pong`.
-- Data channels carry big-endian (network order) binary records, first byte the type:
-  `0x01 PointerMove` (x, y as float32 in 0..1, buttons mask), `0x02
-  ButtonDown` and `0x03 ButtonUp` (button, x, y), `0x04 Scroll` (x, y, dx,
-  dy, unit, phase), `0x05 KeyDown` and `0x06 KeyUp` (Android key code, meta
-  state, repeat, Unicode code point), `0x07 Text` (length, UTF-8), `0x08
-  ReleaseAll`. `PointerMove` and `Scroll` use the `pointer` channel; the rest
-  use `input`. Button events carry their own position so channel reordering
-  cannot misplace a click.
+  `targetInfo` (title, app), `clipboard`, `error`, `pong`.
+- Data channels carry big-endian (network order) binary records, first byte
+  the type: `0x01 PointerMove` (x, y as float32 in 0..1, buttons mask),
+  `0x02 ButtonDown` and `0x03 ButtonUp` (button, x, y), `0x04 Scroll` (x, y,
+  dx, dy, unit, phase), `0x05 KeyDown` and `0x06 KeyUp` (Mac virtual key as
+  uint16 with 0xFFFF for none, Mac modifier flags as uint16, repeat as uint8,
+  Unicode code point as uint32 or 0), `0x07 Text` (length, UTF-8),
+  `0x08 ReleaseAll`. Modifier flag bits: 0 Shift, 1 Control, 2 Option,
+  3 Command, 4 Function, 5 Caps Lock. `PointerMove` and `Scroll` use the
+  `pointer` channel; the rest use `input`. Button events carry their own
+  position so channel reordering cannot misplace a click.
 
 ## 7. Coordinate mapping
 
@@ -440,22 +519,41 @@ Spike S1 confirms the unit of R with a `sourceRect` in place; the mapper's unit
 tests use fixtures recorded there, including a secondary display with a
 negative origin and a different scale factor.
 
-## 8. Keyboard mapping policy
+## 8. Keyboard translation and remapping
 
-- A static table maps Android `KeyEvent` codes to macOS virtual key codes for
-  the US ANSI layout: letters, digits, punctuation, space, enter, tab,
-  backspace, forward delete, escape, arrows, home, end, page up and down,
-  F1 to F19, caps lock, both sides of shift, control, alt and meta, and the
-  numeric keypad. Keys without an entry fall back to a `Text` message when a
-  Unicode character is present, and are dropped otherwise.
-- Modifier policy "Mac" (default): Ctrl becomes Command, Meta becomes Control,
-  Alt becomes Option, Shift stays. Policy "Raw": Ctrl stays Control, Meta
-  becomes Command. The policy is chosen per host in the client and sent in
-  `startSession`.
-- The client never intercepts system-owned combinations it cannot receive;
-  with keyboard capture on, the ones Android hands over are forwarded as is.
-- The tables are written from the Android and Carbon HIToolbox documentation,
-  not copied from GPL projects.
+Translation runs on the client in `KeyTranslator`, a pure function from
+(Android key code, meta state, repeat, Unicode character) to one of: a Mac
+virtual key with flags, a text fallback, or nothing. It is configured by a
+`Keymap` value with three parts, edited in Settings, Keyboard:
+
+1. **Preset.** "Mac-style" (default): Ctrl sends Command, Alt sends Option,
+   Meta sends Control, Caps Lock stays Caps Lock. "PC-style": Ctrl sends
+   Control, Alt sends Option, Meta sends Command. "Custom" unlocks the map
+   below with the current values as the starting point.
+2. **Modifier map.** For each of Ctrl, Alt, Meta and Caps Lock (both sides
+   together), a target of Command, Option, Control, Shift, Function, Caps
+   Lock or Nothing. The map applies both to modifier keys pressed on their
+   own (they become the matching Mac modifier key so holding them works for
+   drag and click modifiers) and to the flags of every other key.
+3. **Rules.** An ordered list of "when I press this, send that". The source
+   is a physical key plus a set of Android modifiers, captured by pressing
+   the combination in a field. The target is a Mac key chosen by name from a
+   list, plus Mac modifiers, or "Text" with a string. Rules match on the
+   exact modifier set, run before the modifier map, and win over it. Typical
+   uses: Delete sends Forward Delete, Alt+Left sends Command+Left, Meta+Space
+   sends Command+Space.
+
+The base table maps the US ANSI layout: letters, digits, punctuation, space,
+enter, tab, backspace, forward delete, escape, arrows, home, end, page up and
+down, F1 to F19, caps lock, both sides of shift, control, alt and meta, and the
+numeric keypad. Keys without an entry and without a matching rule fall back to
+a `Text` record when the event carries a Unicode character, and are dropped
+otherwise. The tables are written from the Android and Carbon HIToolbox
+documentation, not copied from GPL projects.
+
+The client never intercepts system-owned combinations it cannot receive; with
+keyboard capture on, the ones Android hands over are translated like any
+other key. The keymap is global in v1; per-host profiles are phase 2.
 
 ## 9. Security model
 
@@ -475,32 +573,40 @@ negative origin and a different scale factor.
 | Metric | Target | How it is met or measured |
 |---|---|---|
 | Frame rate | 60 fps at up to 2560x1600 output | hardware capture scaling, VideoToolbox, `maxFramerate` 60 |
+| Concurrent sessions | 4 windows at 60 fps, 1920x1200 class, without drops; hard limit 6 per client | measured in S2 with three streams; the bitrate cap is shared beyond two |
 | Glass-to-glass latency on Wi-Fi | 60 ms typical, 80 ms worst case | playout delay 0/0 on both ends, no upscaling, stats overlay, camera test in S2 |
 | Input to visible effect | under 100 ms | unordered pointer channel, HID tap posting |
-| Bitrate | 2 to 40 Mbps adaptive | BWE bounds, per-host cap |
+| Bitrate | 2 to 40 Mbps adaptive per session | BWE bounds, per-host cap |
 | Host CPU while idle in picker | under 5 percent | thumbnails only while subscribed, 2 s cadence |
 
 If measured latency in S2 exceeds target with the stock decoder, the client
 wraps MediaCodec in its own decoder factory with `KEY_LOW_LATENCY`; if it still
 exceeds target, the transport interface gains a raw H.264-over-TLS
-implementation (both sides isolate transport behind a `MediaTransport` interface from the start).
+implementation (both sides isolate transport behind a `MediaTransport`
+interface from the start).
 
 ## 11. Testing strategy
 
 - Shared test vectors in `protocol/testvectors/`: JSON message samples, binary
-  input records, pairing proof vectors and coordinate fixtures. Both code
-  bases must pass them, which keeps the two codecs identical.
+  input records, pairing proof vectors, coordinate fixtures and keymap cases
+  (preset outputs, rule precedence, modifier keys on their own, text
+  fallback). Both code bases must pass the ones that apply to them, which
+  keeps the two codecs identical.
 - Host: `WindowcastCore` is a Swift package holding protocol models, the input
-  codec, the coordinate mapper, the key map and pairing crypto, tested with
-  `swift test`. `ControlServerTests` start the server on an ephemeral port
-  with a fake catalog and drive pairing and listing with
-  `URLSessionWebSocketTask`.
-- Client: JVM unit tests for the same vectors plus viewport math and the host
-  store; a Compose UI test for the Picker against `FakeHostApi`; the
-  device is the integration target (no emulator required).
+  codec, the coordinate mapper and pairing crypto, tested with `swift test`.
+  `SessionRegistryTests` cover the busy and limit rules. `ControlServerTests`
+  start the server on an ephemeral port with a fake catalog and drive pairing
+  and listing with `URLSessionWebSocketTask`.
+- Client: JVM unit tests for the same vectors plus `KeyTranslator`, viewport
+  math, the registry's target-to-session map and the stores; Compose UI tests
+  for the Picker and the Keyboard settings against `FakeHostApi`; the device
+  is the integration target (no emulator required).
 - Manual checklist in `docs/TESTING.md`: permissions, pairing, revoke,
-  picker, window session, display session, move across displays, resize,
-  minimize and restore, close, focus loss, shortcuts, scrolling, clipboard,
+  picker, window session, display session, three sessions at once with focus
+  switching and typing into each, closing one window while others continue,
+  the host's limit message, move across displays, resize, each Resize menu
+  item including follow mode, minimize and restore, close, focus loss,
+  shortcuts under each preset and a custom rule, scrolling, clipboard,
   reconnect, permission revoked mid-session.
 - Spikes S1 and S2 produce numbers and behavior tables before the MVP starts.
 
@@ -542,16 +648,20 @@ the spikes report, so their findings feed it.
 
 - S1 capture and poke (Mac only): enumerate windows; stream an app-filtered
   crop of a chosen window; log per-frame geometry; observe occluded, minimized,
-  other-Space and cross-display behavior; raise and activate from a background
-  agent; post a click at a computed point in Finder, Safari, Terminal, Chrome
-  and System Settings. Exit: a behavior table, a confirmed mapping formula, and
-  activation working in all five apps or a documented fallback.
+  other-Space and cross-display behavior; run three such streams at once and
+  watch CPU and GPU; raise and activate from a background agent; post a click
+  at a computed point in Finder, Safari, Terminal, Chrome and System Settings;
+  set a window's size through Accessibility in each. Exit: a behavior table, a
+  confirmed mapping formula, and activation and resizing working in all five
+  apps or a documented fallback.
 - S2 WebRTC loop (Mac to Googlebook): the S1 stream over WebRTC to a bare
   Android activity; latency with and without the playout-delay trials; 60 fps
-  at 1920x1200 output; H.264 level negotiation and HEVC decode availability on
-  the Snapdragon X; behavior of keyboard capture and Esc; the local network
-  permission and foreground service in practice. Exit: a numbers table and the
-  codec and decoder decisions.
+  at 1920x1200 output; three concurrent streams into three Android windows
+  opened with `setLaunchBounds`; H.264 level negotiation and HEVC decode
+  availability on the Snapdragon X; behavior of keyboard capture and Esc; the
+  local network permission and foreground service in practice; whether
+  Android 17 offers any app-initiated window resize. Exit: a numbers table and
+  the codec and decoder decisions.
 
 ### Phase 1: MVP, one runnable increment per milestone
 
@@ -560,24 +670,28 @@ the spikes report, so their findings feed it.
   tests and shared vectors.
 - M2 Client foundation: Gradle project, Hosts screen with discovery and manual
   entry, pairing, token storage, `ControlClient` with tests, `FakeHostApi`.
-- M3 Catalog: listing, thumbnails and change pushes on the host; Picker on the
-  client.
-- M4 Video session: capture engine, tracker, WebRTC, session renderer,
-  viewport policy, session states, reconnect, foreground service.
-- M5 Input: data channels, injector, mapping, keyboard with capture toggle,
-  scrolling, release-all on focus loss, clipboard text, Match size.
-- M6 Hardening and release: stats overlay, settings, permission-revoked
-  handling, CI, README with Googlebook install steps, CLAUDE.md, TESTING.md,
-  PICKING-UP.md, v0.1 release.
+- M3 Catalog: listing, thumbnails, icons and change pushes on the host; Picker
+  on the client.
+- M4 Video sessions: capture engine, tracker, per-session WebRTC, session
+  registries on both sides, `SessionActivity` per window with launch bounds
+  and task descriptions, Picker badges, viewport policy, session states,
+  reconnect, foreground service.
+- M5 Input and window controls: data channels, injector with global key state,
+  `KeyTranslator` with the base table, the Keyboard settings screen (presets,
+  modifier map, rules), keyboard capture toggle, scrolling, release-all on
+  focus loss, clipboard text, the Resize menu with match, follow and presets.
+- M6 Hardening and release: stats overlay, remaining settings,
+  permission-revoked handling, CI, README with Googlebook install steps,
+  CLAUDE.md, TESTING.md, PICKING-UP.md, v0.1 release.
 
 ### Phase 2 backlog
 
-Several windows at once (one Android window per Mac window, several tracks on
-one connection), remote cursor shapes via `NSCursor.currentSystem`, the Mac
-menu bar as native Android menus built from the Accessibility menu tree, HEVC
-by default where it measures better, per-app audio, Tailscale documentation
-and STUN option, non-US layouts through `UCKeyTranslate`, relative mouse mode,
-host auto-update.
+Remote cursor shapes via `NSCursor.currentSystem`, the Mac menu bar as native
+Android menus built from the Accessibility menu tree, HEVC by default where it
+measures better, per-app audio, Tailscale documentation and STUN option,
+non-US base layouts through `UCKeyTranslate`, per-host keymap profiles and
+separate left and right modifiers, relative mouse mode, "open all windows of
+this app", host auto-update.
 
 ## 14. Risks and mitigations
 
@@ -592,26 +706,39 @@ host auto-update.
    filter with popups accepted as missing.
 4. Output-size changes rebuild the encoder. Mitigation: debounce, never
    upscale, 2 percent hysteresis.
-5. Wi-Fi jitter. Mitigation: adaptive bitrate, stats overlay, per-host cap,
-   raw-TLS transport as a fallback path.
+5. Wi-Fi jitter, worse with several streams. Mitigation: adaptive bitrate, a
+   shared cap beyond two sessions, stats overlay, raw-TLS transport as a
+   fallback path.
 6. Keyboard capture semantics on Googlebook OS (Esc hint) may fight the Mac's
    Esc. Mitigation: S2 measures, toolbar toggle, Esc consumed at dispatch.
-7. Snapdragon X decoder quirks. Mitigation: H.264 default, S2 measurements,
-   optional custom decoder factory.
+7. Snapdragon X decoder quirks, including several decoders at once.
+   Mitigation: H.264 default, S2 measurements with three streams, optional
+   custom decoder factory.
 8. Dependence on a forked libwebrtc distribution. Mitigation: pinned
    versions, transport behind an interface.
 9. Keychain and TLS identity friction. Mitigation: regenerate on failure,
    re-pair flow, tested in M1.
 10. The remote pointer's shape is not visible in v1. Mitigation: phase 2
     cursor sync; the local arrow is always responsive.
+11. Two session windows fighting over which Mac window is in front.
+    Mitigation: only clicks and keys raise, never hovering; the injector
+    checks at most every 250 ms.
+12. Apps that refuse Accessibility resizing make follow mode look broken.
+    Mitigation: the tracker reports the real size and the video letterboxes;
+    the menu shows the size actually reached.
+13. Android cannot resize its own window after launch. Mitigation: size at
+    launch from the Mac window, and offer the Mac-side Resize menu; S2 checks
+    Android 17 for a new API.
 
 ## 15. Open items resolved by spikes, not by review
 
 - Units of `contentRect` when `sourceRect` is set (S1).
 - Whether `updateConfiguration` for `sourceRect` alone is cheap at 10 Hz (S1).
-- Measured latency and the decoder flag decision (S2).
+- Host cost of three concurrent streams (S1) and their measured latency (S2).
+- The decoder flag decision (S2).
 - Whether the Googlebook trackpad reports two-finger scroll as touchpad or
   mouse source (S2).
+- Whether Android 17 exposes an app-initiated window resize (S2).
 
 ## 16. References
 
@@ -622,8 +749,8 @@ host auto-update.
 - webrtc-sdk Android and Specs releases 150.7871.01 (LiveKit fork of
   libwebrtc, August 2026); field trials in `rtp_sender_video.cc` and
   `rtp_video_stream_receiver2.cc`.
-- Android desktop windowing, local network permission and foreground service
-  types: developer.android.com guides for Android 16 and 17.
+- Android desktop windowing, multi-instance, local network permission and
+  foreground service types: developer.android.com guides for Android 16 and 17.
 - Googlebook field notes: `kuscher/vscodebook` docs/GOOGLEBOOK.md; helper
   script and build conventions from `kuscher/studiosnap` and `kuscher/officebook`.
 - Prior art examined and rejected as bases: RustDesk (CGDisplayStream capture,
