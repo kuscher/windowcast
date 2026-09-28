@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+host-macos/*.xcodeproj
+host-macos/Local.xcconfig
+host-macos/**/xcuserdata/
+host-macos/**/.build/
+host-macos/**/DerivedData/
+.swiftpm/
+
+# Android
+client-android/.gradle/
+client-android/**/build/
+client-android/local.properties
+client-android/.kotlin/
+*.keystore
+*.jks
+keystore.pass
+*.apk
+*.aab
+
+# Editors and tools
+.idea/
+*.iml
+.vscode/
+spikes/**/out/
