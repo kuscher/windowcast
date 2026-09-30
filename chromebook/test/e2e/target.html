@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Windowcast test target</title>
+  <style>
+    html, body { margin: 0; font: 16px system-ui, sans-serif; background: #fff; }
+    #btn { position: absolute; left: 120px; top: 90px; width: 220px; height: 80px; font-size: 18px; }
+    #field { position: absolute; left: 120px; top: 230px; width: 320px; height: 40px; font-size: 18px; }
+    #tall { position: absolute; top: 0; left: 0; width: 1px; height: 4000px; }
+  </style>
+</head>
+<body>
+  <button id="btn" type="button">Click me</button>
+  <input id="field" autocomplete="off" aria-label="Test field">
+  <div id="tall"></div>
+  <script>
+    window.__events = [];
+    document.getElementById('btn').addEventListener('click', (e) => {
+      window.__events.push({ type: 'click', trusted: e.isTrusted, x: e.clientX, y: e.clientY });
+    });
+    document.getElementById('field').addEventListener('input', (e) => {
+      window.__events.push({ type: 'input', trusted: e.isTrusted, value: e.target.value });
+    });
+    window.addEventListener('scroll', () => { window.__scrolled = window.scrollY; });
+  </script>
+</body>
+</html>

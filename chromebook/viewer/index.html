@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Windowcast</title>
+  <meta name="description" content="See and control a window from your Chromebook.">
+  <meta name="theme-color" content="#1d2129">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-32.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="viewer.css">
+</head>
+<body data-phase="connecting">
+  <header class="bar" id="bar">
+    <div class="group">
+      <button id="back" class="icon" type="button" aria-label="Back" title="Back (Alt+Left)" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
+      <button id="forward" class="icon" type="button" aria-label="Forward" title="Forward (Alt+Right)" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+      </button>
+      <button id="reload" class="icon" type="button" aria-label="Reload" title="Reload (Ctrl+R)" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19 4.5V9h-4.5"/></svg>
+      </button>
+    </div>
+    <form id="go" class="address" autocomplete="off">
+      <input id="address" type="text" spellcheck="false" autocapitalize="off" placeholder="Search or type a web address" aria-label="Address of the Chromebook tab" disabled>
+    </form>
+    <div class="group">
+      <button id="tabs" class="tabs-button" type="button" aria-haspopup="true" aria-expanded="false" title="Tabs on the Chromebook" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="7" width="13" height="12" rx="2"/><path d="M8 4h10a2 2 0 0 1 2 2v9"/></svg>
+        <span id="tab-count">0</span>
+      </button>
+      <span id="dot" class="dot" data-state="off" role="img" aria-label="Not connected" title="Not connected"></span>
+      <button id="full" class="icon" type="button" aria-label="Full screen" title="Full screen: keyboard shortcuts go to the Chromebook">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="tab-menu" class="tab-menu" hidden>
+    <ul id="tab-list" aria-label="Tabs on the Chromebook"></ul>
+    <button id="new-tab" class="new-tab" type="button">New tab</button>
+  </div>
+
+  <main id="stage" class="stage" tabindex="0" aria-label="Chromebook window">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="overlay" class="overlay">
+      <h1 id="ov-title">Connecting to your Chromebook</h1>
+      <p id="ov-body"></p>
+      <p id="ov-meta" class="meta"></p>
+      <button id="ov-action" class="action" type="button" hidden></button>
+    </div>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </main>
+
+  <script src="lib/peerjs.min.js"></script>
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>

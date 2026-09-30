@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Windowcast</title>
+  <link rel="icon" href="icons/icon-32.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="host.css">
+</head>
+<body>
+  <header class="top">
+    <img src="icons/icon-32.png" alt="" width="22" height="22">
+    <span class="brand">Windowcast</span>
+    <span id="broker" class="broker" data-state="connecting" role="status">Connecting</span>
+  </header>
+
+  <main>
+    <figure class="stage" id="stage" data-state="idle">
+      <video id="preview" muted playsinline autoplay aria-label="Live preview of the shared window"></video>
+      <figcaption class="stage-empty" id="stage-empty">Nothing shared yet</figcaption>
+    </figure>
+
+    <h1 id="title">Choose a window to share</h1>
+    <p id="status" class="status">Your Googlebook can dial in once a window is shared.</p>
+
+    <div id="control" class="control" hidden>
+      <p id="control-text"></p>
+      <label id="control-pick-wrap" class="control-pick" hidden>
+        <span>Control this window instead</span>
+        <select id="control-pick"></select>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button id="pick" class="primary" type="button">Choose a window</button>
+      <button id="stop" class="quiet" type="button" hidden>Stop sharing</button>
+    </div>
+
+    <section class="pair" aria-labelledby="pair-title">
+      <h2 id="pair-title">Pairing link</h2>
+      <p>Open it once on your Googlebook. After that, the Googlebook reconnects on its own.</p>
+      <div class="row">
+        <button id="copy" type="button">Copy link</button>
+        <a id="email" class="button" href="#">Email it to yourself</a>
+      </div>
+      <p id="copied" class="hint" role="status"></p>
+    </section>
+
+    <section class="settings">
+      <label class="toggle"><input type="checkbox" id="awake" checked><span>Keep this Chromebook awake while sharing</span></label>
+      <label class="toggle"><input type="checkbox" id="autostart" checked><span>After a restart, open this window and ask which window to share</span></label>
+    </section>
+
+    <details class="details">
+      <summary>Details</summary>
+      <dl id="diag"></dl>
+      <button id="rekey" class="danger" type="button">Make a new pairing link</button>
+      <p class="hint">A new link disconnects your Googlebook until you open the new link on it.</p>
+    </details>
+  </main>
+
+  <script src="lib/peerjs.min.js"></script>
+  <script type="module" src="host.js"></script>
+</body>
+</html>
