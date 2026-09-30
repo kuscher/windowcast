@@ -1,7 +1,7 @@
 // Windowcast viewer: dials into the paired Chromebook, shows its shared window and forwards input.
 import { PROTOCOL_VERSION, MSG } from './shared/protocol.js';
 import { isValidHostId, isValidKey, parsePairingFragment } from './shared/ids.js';
-import { extractFingerprint, computeProof, verifyProof, newNonce } from './shared/auth.js';
+import { channelFingerprints, computeProof, verifyProof, newNonce } from './shared/auth.js';
 import { videoContentRect, normalizePointer } from './shared/geometry.js';
 import { browserShortcut } from './shared/keys.js';
 import { retryDelay } from './shared/retry.js';
@@ -31,9 +31,15 @@ function stored() {
 
 function takeLink() {
   const p = parsePairingFragment(location.hash);
-  if (!p) return null;
-  store(p);
   history.replaceState(null, '', location.pathname + location.search);  // keep the key out of the address bar
+  if (!p) return null;
+  // A link for another Chromebook replaces the pairing only when the person agrees.
+  const current = stored();
+  if (current && current.hostId !== p.hostId
+    && !window.confirm(`Connect this viewer to a different Chromebook? Its pairing ID starts with ${p.hostId.slice(0, 9)}.`)) {
+    return null;
+  }
+  store(p);
   return p;
 }
 
@@ -54,7 +60,10 @@ let helloTimer = null;
 let connectTimer = null;
 let stopped = false;
 let hasVideo = false;
-let remote = { sharing: false, title: '', controllable: false, note: null, tabs: [], url: '' };
+let remote = { sharing: false, title: '', controllable: false, note: null, tabs: [], more: 0, url: '' };
+// Before authentication nothing from the other side can be trusted: an "invalid" or "wrong version" answer
+// could come from someone holding the Chromebook's id while it's offline, so it slows retries but never stops them.
+const SLOW = new Set(['invalid', 'version']);
 let detail = '';
 const events = [];
 function note(text) {
@@ -68,7 +77,7 @@ function connect() {
   teardown();
   if (!pairing) { setPhase('unpaired'); return; }
   if (stopped) return;
-  setPhase(attempt === 0 ? 'connecting' : 'waiting');
+  if (!SLOW.has(phase)) setPhase(attempt === 0 ? 'connecting' : 'waiting');
   note(`connect attempt ${attempt}`);
   const p = new Peer({ debug: 1 });
   peer = p;
@@ -110,14 +119,14 @@ function fail(reason) {
   if (stopped || retryTimer) return;
   const wasConnected = authed;
   teardown();
-  if (reason === 'auth-fail') { stopped = true; setPhase('invalid'); return; }
   if (reason === 'replaced') { stopped = true; setPhase('replaced'); return; }
-  if (reason === 'version') { stopped = true; setPhase('version'); return; }
+  if (reason === 'auth-fail') setPhase('invalid');
+  else if (reason === 'version') setPhase('version');
   if (wasConnected) attempt = 0;
-  const delay = retryDelay(attempt++);
+  const delay = SLOW.has(phase) ? 60000 : retryDelay(attempt++);
   retryAt = Date.now() + delay;
   retryTimer = setTimeout(() => { retryTimer = null; connect(); }, delay);
-  setPhase(reason === 'unverified' ? 'unverified' : 'waiting');
+  if (!SLOW.has(phase)) setPhase(reason === 'unverified' ? 'unverified' : 'waiting');
 }
 
 function tryNow() {
@@ -139,15 +148,12 @@ async function onMessage(m) {
       clearTimeout(helloTimer);
       if (m.v !== PROTOCOL_VERSION) { fail('version'); return; }
       const c = conn;
-      const rtc = c.peerConnection;
+      // Fingerprints of the certificates DTLS actually verified, cross-checked against the SDP.
+      const fps = await channelFingerprints(c.peerConnection);
+      if (conn !== c) return;
+      if (!fps) { fail('no-fingerprint'); return; }
       const viewerNonce = newNonce();
-      auth = {
-        hostNonce: String(m.nonce || ''),
-        viewerNonce,
-        hostFingerprint: extractFingerprint(rtc && rtc.remoteDescription && rtc.remoteDescription.sdp),
-        viewerFingerprint: extractFingerprint(rtc && rtc.localDescription && rtc.localDescription.sdp),
-      };
-      if (!auth.hostFingerprint || !auth.viewerFingerprint) { fail('no-fingerprint'); return; }
+      auth = { hostNonce: String(m.nonce || '').slice(0, 64), viewerNonce, hostFingerprint: fps.remote, viewerFingerprint: fps.local };
       const proof = await computeProof(pairing.key, 'viewer', auth);
       if (conn === c) c.send({ t: MSG.AUTH, nonce: viewerNonce, proof });
       return;
@@ -163,7 +169,7 @@ async function onMessage(m) {
       fail('auth-fail');
       return;
     case MSG.BYE:
-      if (m.reason === 'replaced') fail('replaced');
+      if (authed && m.reason === 'replaced') fail('replaced');
       return;
     default:
       break;
@@ -173,7 +179,43 @@ async function onMessage(m) {
   else if (m.t === MSG.ICE) { if (pc && m.candidate) await pc.addIceCandidate(m.candidate).catch(() => {}); }
   else if (m.t === MSG.STATE) applyState(m);
   else if (m.t === MSG.NOTICE) toast(String(m.text || '').slice(0, 300));
+  else if (m.t === MSG.DIALOG) showPageDialog(m);
+  else if (m.t === MSG.DIALOG_CLOSED) closePageDialog();
 }
+
+// ---------- page dialogs (alert, confirm, prompt, leave page) ----------
+
+let dialogFromHost = false;
+
+function showPageDialog(m) {
+  const kind = ['alert', 'confirm', 'prompt', 'beforeunload'].includes(m.kind) ? m.kind : 'alert';
+  const leave = kind === 'beforeunload';
+  $('pd-title').textContent = leave ? 'Leave this page? Changes you made may not be saved.'
+    : kind === 'alert' ? 'The page on your Chromebook says' : 'The page on your Chromebook asks';
+  $('pd-message').textContent = leave ? '' : clip(m.message, 1000);
+  $('pd-message').hidden = leave;
+  $('pd-input').hidden = kind !== 'prompt';
+  $('pd-input').value = clip(m.prompt, 500);
+  $('pd-cancel').hidden = kind === 'alert';
+  $('pd-cancel').textContent = leave ? 'Stay' : 'Cancel';
+  $('pd-ok').textContent = leave ? 'Leave' : 'OK';
+  const d = $('page-dialog');
+  dialogFromHost = true;
+  if (!d.open) d.showModal();
+  (kind === 'prompt' ? $('pd-input') : $('pd-ok')).focus();
+}
+
+function closePageDialog() {
+  dialogFromHost = false;
+  if ($('page-dialog').open) $('page-dialog').close();
+}
+
+$('page-dialog').addEventListener('close', () => {
+  if (!dialogFromHost) return;
+  dialogFromHost = false;
+  send({ t: MSG.DIALOG_ANSWER, accept: $('page-dialog').returnValue === 'ok', text: $('pd-input').value });
+  stage.focus();
+});
 
 async function onOffer(sdp) {
   if (!sdp || sdp.type !== 'offer') return;
@@ -212,6 +254,7 @@ function applyState(m) {
       active: Boolean(t.active),
       icon: typeof t.icon === 'string' && /^(https:|data:image\/)/.test(t.icon) ? t.icon : '',
     })) : [],
+    more: Math.max(0, Number(m.more) || 0),
     url: clip(m.url, 2048),
   };
   if (!remote.sharing) hasVideo = false;
@@ -250,13 +293,13 @@ function overlayContent() {
     case 'invalid':
       return {
         title: 'This pairing link doesn’t work anymore',
-        body: 'The Chromebook made a new link. Open the new link on this device.',
-        action: ['Forget this Chromebook', forget],
+        body: 'The Chromebook may have made a new link. Open the new link on this device. Windowcast checks again every minute.',
+        action: ['Try now', tryNow], secondary: ['Forget this Chromebook', forget],
       };
     case 'replaced':
       return { title: 'Showing on another device', body: 'Your Chromebook window opened somewhere else, so it closed here.', action: ['Show it here', tryNow] };
     case 'version':
-      return { title: 'Update Windowcast on the Chromebook', body: 'The extension and this viewer are different versions. Update the extension, then reload this page.' };
+      return { title: 'Update Windowcast on the Chromebook', body: 'The extension and this viewer are different versions. Update the extension; this page checks again every minute.', action: ['Try now', tryNow] };
     case 'connected':
       if (!remote.sharing) return { title: 'Nothing is shared yet', body: 'On the Chromebook, click the Windowcast icon in the window you want to see here.' };
       if (!hasVideo) return { title: 'Connecting to your Chromebook', body: '' };
@@ -292,6 +335,12 @@ function render() {
       action.textContent = content.action[0];
       action.onclick = content.action[1];
     }
+    const secondary = $('ov-secondary');
+    secondary.hidden = !content.secondary;
+    if (content.secondary) {
+      secondary.textContent = content.secondary[0];
+      secondary.onclick = content.secondary[1];
+    }
   }
 
   const connected = phase === 'connected' && remote.sharing;
@@ -314,7 +363,7 @@ function render() {
   } else if (phase === 'connecting' || phase === 'waiting') {
     dotState = 'wait';
     label = 'Connecting';
-  } else if (phase === 'invalid' || phase === 'unverified' || phase === 'version') {
+  } else if (SLOW.has(phase) || phase === 'unverified') {
     dotState = 'error';
     label = 'Can’t connect';
   }
@@ -374,6 +423,12 @@ function renderTabs() {
     li.append(item, close);
     return li;
   }));
+  if (remote.more > 0) {
+    const li = document.createElement('li');
+    li.className = 'more';
+    li.textContent = `${remote.more} more tab${remote.more === 1 ? ' isn’t' : 's aren’t'} listed`;
+    $('tab-list').append(li);
+  }
 }
 
 function openMenu() {

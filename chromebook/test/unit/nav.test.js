@@ -2,9 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { toUrlOrSearch } from '../../shared/nav.js';
 
-test('full URLs pass through', () => {
+test('web addresses pass through', () => {
   assert.deepEqual(toUrlOrSearch('https://example.com/a?b=1'), { kind: 'url', url: 'https://example.com/a?b=1' });
-  assert.deepEqual(toUrlOrSearch('  chrome://settings '), { kind: 'url', url: 'chrome://settings' });
+  assert.deepEqual(toUrlOrSearch('  http://example.com '), { kind: 'url', url: 'http://example.com' });
+  assert.deepEqual(toUrlOrSearch('about:blank'), { kind: 'url', url: 'about:blank' });
+});
+
+test('browser, file and script addresses are refused', () => {
+  for (const t of ['chrome://settings', 'file:///etc/passwd', 'chrome-extension://abc/x.html', 'view-source:https://a.com',
+    'javascript:alert(1)', 'data:text/html,hi', 'about:settings', 'ftp://example.com/']) {
+    assert.equal(toUrlOrSearch(t).kind, 'blocked', t);
+  }
 });
 
 test('bare domains and paths get https', () => {
@@ -20,7 +28,6 @@ test('local names and addresses get http', () => {
 test('everything else is a search', () => {
   assert.deepEqual(toUrlOrSearch('weather in berlin'), { kind: 'search', query: 'weather in berlin' });
   assert.deepEqual(toUrlOrSearch('pytest'), { kind: 'search', query: 'pytest' });
-  assert.deepEqual(toUrlOrSearch('javascript:alert(1)'), { kind: 'search', query: 'javascript:alert(1)' });
 });
 
 test('empty input is nothing', () => {

@@ -110,4 +110,5 @@ button.danger { color: var(--danger); background: transparent; }
 .details summary { cursor: pointer; color: var(--muted); }
 .details dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 13px; margin: 12px 0 16px; }
 .details dt { color: var(--muted); }
-.details dd { margin: 0; overflow-wrap: anywhere; }
+.details dd { margin: 0; overflow-wrap: anywhere; white-space: pre-line; }
+#fix-id { margin-top: 10px; }

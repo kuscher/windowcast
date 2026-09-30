@@ -38,3 +38,35 @@ export async function verifyProof(key, role, params, proof) {
     return false;
   }
 }
+
+export function normalizeFingerprint(algorithm, value) {
+  return typeof algorithm === 'string' && typeof value === 'string' && algorithm && value
+    ? `${algorithm.toLowerCase()} ${value.toUpperCase()}`
+    : null;
+}
+
+/**
+ * Fingerprints of the certificates the connected DTLS transport actually uses, from getStats().
+ * Returns {local, remote}, or null unless there is exactly one connected transport with both certificates.
+ */
+export function fingerprintsFromStats(report) {
+  const transports = [];
+  report.forEach((r) => { if (r.type === 'transport' && r.dtlsState === 'connected') transports.push(r); });
+  if (transports.length !== 1) return null;
+  const cert = (id) => (id ? report.get(id) : undefined);
+  const local = cert(transports[0].localCertificateId);
+  const remote = cert(transports[0].remoteCertificateId);
+  const l = local && normalizeFingerprint(local.fingerprintAlgorithm, local.fingerprint);
+  const r = remote && normalizeFingerprint(remote.fingerprintAlgorithm, remote.fingerprint);
+  return l && r ? { local: l, remote: r } : null;
+}
+
+/** The connection's fingerprints from its transport; null if missing or if the SDP says otherwise. */
+export async function channelFingerprints(pc) {
+  const fromStats = fingerprintsFromStats(await pc.getStats());
+  if (!fromStats) return null;
+  const sdpLocal = extractFingerprint(pc.localDescription && pc.localDescription.sdp);
+  const sdpRemote = extractFingerprint(pc.remoteDescription && pc.remoteDescription.sdp);
+  if ((sdpLocal && sdpLocal !== fromStats.local) || (sdpRemote && sdpRemote !== fromStats.remote)) return null;
+  return fromStats;
+}

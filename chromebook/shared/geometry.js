@@ -39,22 +39,54 @@ export function mapToPage(nx, ny, frame, win, page, zoom) {
   return { zone: 'page', x: xd / zoom, y: (yd - top) / zoom };
 }
 
+/** Frame size a window produces: DIP times screen scale, scaled down to fit the capture limits. */
+export function expectedFrameSize(win, dpr, limits) {
+  const w = win.width * dpr;
+  const h = win.height * dpr;
+  const s = Math.min(1, limits.maxWidth / w, limits.maxHeight / h);
+  return { w: Math.round(w * s), h: Math.round(h * s) };
+}
+
+/** Ids of the windows whose expected frame matches within 3 percent, the nominated one first. */
+export function sizeCandidates(frameW, frameH, windows, dpr, limits, nominatedId) {
+  const close = (a, b) => Math.abs(a - b) / b <= 0.03;
+  const ids = windows
+    .filter((w) => { const e = expectedFrameSize(w, dpr, limits); return close(frameW, e.w) && close(frameH, e.h); })
+    .map((w) => w.id);
+  return ids.includes(nominatedId) ? [nominatedId, ...ids.filter((id) => id !== nominatedId)] : ids;
+}
+
+/** Inverse of mapToPage: a CSS point in the page to 0..1 on the frame. */
+export function pageToFrame(x, y, frame, win, page, zoom) {
+  const r = videoContentRect(frame.w, frame.h, win.width, win.height);
+  const top = Math.max(0, win.height - page.innerHeight * zoom);
+  const wx = (x * zoom) / win.width;
+  const wy = (y * zoom + top) / win.height;
+  return { x: (r.x + wx * r.w) / frame.w, y: (r.y + wy * r.h) / frame.h };
+}
+
+const isMarker = (d, i) => d[i] > 200 && d[i + 1] < 90 && d[i + 2] > 200;
+
 /**
- * Which Chrome window a captured frame shows. windows: [{id, width, height}] in DIP; scale: device pixel ratio.
- * Matches on aspect ratio (the frame may be downscaled), then prefers the nominated window, then a size match.
- * Returns {id, how: 'nominated' | 'unique' | 'ambiguous'} or null.
+ * Looks for the magenta marker the host draws into the page. rgba: pixel data of width x height;
+ * expected: normalized {x, y, w, h}. Found when most of the expected area is magenta and most magenta
+ * pixels are there, so scattered magenta elsewhere doesn't count.
  */
-export function matchWindow(frameW, frameH, windows, nominatedId, scale) {
-  const aspect = frameW / frameH;
-  const candidates = windows.filter((w) => {
-    const a = w.width / w.height;
-    return Math.abs(aspect - a) / a < 0.02;
-  });
-  if (candidates.length === 0) return null;
-  if (candidates.some((w) => w.id === nominatedId)) return { id: nominatedId, how: 'nominated' };
-  if (candidates.length === 1) return { id: candidates[0].id, how: 'unique' };
-  const sized = candidates.filter((w) =>
-    Math.abs(frameW - w.width * scale) / frameW < 0.03 && Math.abs(frameH - w.height * scale) / frameH < 0.03);
-  if (sized.length === 1) return { id: sized[0].id, how: 'unique' };
-  return { id: (sized[0] || candidates[0]).id, how: 'ambiguous' };
+export function detectMarker(rgba, width, height, expected) {
+  const pad = 0.03;
+  const x0 = Math.floor((expected.x - pad) * width);
+  const x1 = Math.ceil((expected.x + expected.w + pad) * width);
+  const y0 = Math.floor((expected.y - pad) * height);
+  const y1 = Math.ceil((expected.y + expected.h + pad) * height);
+  let inside = 0;
+  let total = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!isMarker(rgba, (y * width + x) * 4)) continue;
+      total += 1;
+      if (x >= x0 && x < x1 && y >= y0 && y < y1) inside += 1;
+    }
+  }
+  const area = Math.max(1, expected.w * width * expected.h * height);
+  return { found: inside >= 0.4 * area && inside >= 0.7 * total, inside, total };
 }

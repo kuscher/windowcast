@@ -107,6 +107,21 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
   background: var(--signal); color: #062e6f; font-weight: 600;
 }
 body[data-overlay="off"] .overlay { display: none; }
+.ov-actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.secondary { margin-top: 10px; border: 0; background: transparent; color: var(--bar-muted); cursor: pointer; padding: 9px 4px; text-decoration: underline; text-underline-offset: 3px; }
+.secondary:hover { color: var(--bar-ink); }
+.tab-menu li.more { color: var(--bar-muted); padding: 8px 10px; font-size: 13px; }
+.tab-menu li.more:hover { background: transparent; }
+
+/* A dialog from the page on the Chromebook */
+.page-dialog { border: 1px solid #2f3541; border-radius: 14px; background: var(--bar); color: var(--bar-ink); padding: 20px 22px; width: min(440px, calc(100vw - 32px)); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5); }
+.page-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.pd-title { margin: 0 0 6px; color: var(--bar-muted); font-size: 13px; }
+.pd-message { margin: 0 0 14px; font-size: 16px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; }
+.page-dialog input { width: 100%; height: 34px; border-radius: 8px; border: 1px solid #3a404c; background: var(--field); color: var(--bar-ink); padding: 0 10px; font: inherit; margin-bottom: 14px; }
+.pd-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.pd-actions button { border-radius: 999px; padding: 8px 18px; font-weight: 600; cursor: pointer; border: 1px solid #3a404c; background: transparent; color: var(--bar-ink); }
+.pd-actions .action { margin-top: 0; border-color: transparent; background: var(--signal); color: #062e6f; }
 
 .toast {
   position: absolute; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 2;

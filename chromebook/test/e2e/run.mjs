@@ -32,6 +32,9 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}/`;
 // VIEWER_URL=https://windowcast-viewer.vercel.app/ tests the deployed viewer (with its security headers) instead of the local copy.
 const viewerBase = process.env.VIEWER_URL || base;
+// CAPTURE=1 shares the target through real screen capture (a tab, auto-picked by title) instead of a test
+// pattern, so the host's check that proves which window is shared runs for real.
+const CAPTURE = Boolean(process.env.CAPTURE);
 
 const results = [];
 function check(ok, name, info = '') {
@@ -58,7 +61,8 @@ const browser = await puppeteer.launch({
   headless: !process.env.HEADFUL,
   enableExtensions: [extDir],
   defaultViewport: null,
-  args: ['--autoplay-policy=no-user-gesture-required', '--no-first-run', '--no-default-browser-check'],
+  args: ['--autoplay-policy=no-user-gesture-required', '--no-first-run', '--no-default-browser-check',
+    ...(CAPTURE ? ['--auto-select-desktop-capture-source=Windowcast test target'] : [])],
 });
 
 let host;
@@ -82,7 +86,7 @@ try {
   const targetUrl = target.url();
 
   host = await browser.newPage({ type: 'window', windowBounds: { width: 460, height: 800 } });
-  await host.goto(`chrome-extension://${extId}/host.html?test=pattern&targetUrl=${encodeURIComponent(targetUrl)}&viewer=${encodeURIComponent(viewerBase)}`);
+  await host.goto(`chrome-extension://${extId}/host.html?test=${CAPTURE ? 'capture' : 'pattern'}&targetUrl=${encodeURIComponent(targetUrl)}&viewer=${encodeURIComponent(viewerBase)}`);
   await host.waitForFunction(() => window.__wc && window.__wc.state.broker === 'online' && window.__wc.state.track, { timeout: 40000 });
   check(true, 'host registers with the broker and shares the target window');
   const link = await host.evaluate(() => window.__wc.link());
@@ -102,16 +106,26 @@ try {
   await viewer.screenshot({ path: join(artifacts, 'viewer-connected.png') });
   await host.screenshot({ path: join(artifacts, 'host-live.png') });
 
-  await host.waitForFunction(() => window.__wc.state.control.attached, { timeout: 15000 }).catch(() => {});
-  check(await host.evaluate(() => window.__wc.state.control.attached), 'host attaches control to the shared tab');
+  await host.waitForFunction(() => window.__wc.state.control.attached, { timeout: 20000 }).catch(() => {});
+  if (!(await host.evaluate(() => window.__wc.state.control.attached))) {
+    console.log('host state:', JSON.stringify(await host.evaluate(() => ({
+      events: window.__wc.events, error: window.__wc.state.error, candidates: window.__wc.state.candidates,
+      verifyFailed: window.__wc.state.verifyFailed, control: { ...window.__wc.state.control, canceledBy: undefined },
+      frame: [document.getElementById('preview').videoWidth, document.getElementById('preview').videoHeight], dpr: devicePixelRatio,
+    }))));
+    console.log('tab sizes:', JSON.stringify(await host.evaluate(async () => (await chrome.windows.getAll({ populate: true })).map((w) => ({ id: w.id, w: w.width, h: w.height, tabs: w.tabs.filter((t) => t.active).map((t) => [t.width, t.height, t.url.slice(0, 40)]) })))));
+  }
+  check(await host.evaluate(() => window.__wc.state.control.attached), 'host attaches control to the shared tab',
+    await host.evaluate(() => `window ${window.__wc.state.windowHow}; ${window.__wc.events.filter((e) => /marker|shared a|attach/.test(e)).slice(-3).join(' | ')}`));
 
   // Where to click in the viewer so the host lands on a CSS point in the target page.
   async function viewerPointFor(cssX, cssY) {
-    const win = await host.evaluate(async () => {
+    const inner = await target.evaluate(() => ({ w: innerWidth, h: innerHeight }));
+    // In CAPTURE mode the captured "window" is the tab's page area.
+    const win = CAPTURE ? { width: inner.w, height: inner.h } : await host.evaluate(async () => {
       const w = await chrome.windows.get(window.__wc.state.windowId);
       return { width: w.width, height: w.height };
     });
-    const inner = await target.evaluate(() => ({ w: innerWidth, h: innerHeight }));
     const top = win.height - inner.h;
     const nx = cssX / win.width;
     const ny = (top + cssY) / win.height;
@@ -180,6 +194,53 @@ try {
     await viewer.click('#back');
     await target.waitForFunction(() => location.search === '', { timeout: 15000 });
     check(true, 'the address field navigates the Chromebook tab and Back returns');
+  });
+
+  await step('a page dialog is answered from the viewer', async () => {
+    target.on('dialog', () => {});  // leave the dialog to Windowcast instead of Puppeteer
+    await target.evaluate(() => { window.__answer = undefined; window.scrollTo(0, 0); });
+    const ask = await centerOf('#ask');
+    const p = await viewerPointFor(ask.x, ask.y);
+    await viewer.mouse.click(p.x, p.y);
+    await viewer.waitForFunction(() => document.getElementById('page-dialog').open, { timeout: 10000 });
+    const text = await viewer.evaluate(() => document.getElementById('pd-message').textContent);
+    await viewer.click('#pd-ok');
+    await target.waitForFunction(() => window.__answer === true, { timeout: 10000 });
+    check(text === 'Proceed?', 'a page dialog is answered from the viewer', `dialog said "${text}"`);
+  });
+
+  await step('a window with many long tabs stays connected and lists what fits', async () => {
+    const ids = await host.evaluate(async () => {
+      const made = [];
+      for (let i = 0; i < 45; i++) {
+        const t = await chrome.tabs.create({ windowId: window.__wc.state.windowId, active: false, url: `about:blank#${i}-${'x'.repeat(1500)}` });
+        made.push(t.id);
+      }
+      return made;
+    });
+    await viewer.waitForFunction(() => window.__wcViewer.remote.more > 0, { timeout: 15000 });
+    await new Promise((r) => setTimeout(r, 1500));
+    const r = await viewer.evaluate(() => ({ phase: window.__wcViewer.phase, listed: window.__wcViewer.remote.tabs.length, more: window.__wcViewer.remote.more }));
+    await host.evaluate(async (list) => { await chrome.tabs.remove(list); }, ids);
+    check(r.phase === 'connected' && r.listed <= 40 && r.listed + r.more === 46, 'a window with many long tabs stays connected and lists what fits', JSON.stringify(r));
+  });
+
+  await step('the address field refuses Chrome pages', async () => {
+    await viewer.click('#address');
+    await viewer.type('#address', 'chrome://settings');
+    await viewer.keyboard.press('Enter');
+    await viewer.waitForFunction(() => !document.getElementById('toast').hidden && /only web addresses/.test(document.getElementById('toast').textContent), { timeout: 10000 });
+    check(!(await target.evaluate(() => location.href)).startsWith('chrome:'), 'the address field refuses Chrome pages');
+  });
+
+  await step('a Chrome page shows the reason control is refused', async () => {
+    await host.evaluate(async () => { await chrome.tabs.update((await chrome.tabs.query({ windowId: window.__wc.state.windowId, active: true }))[0].id, { url: 'chrome://version/' }); });
+    await viewer.waitForFunction(() => /Chrome’s own pages/.test(window.__wcViewer.remote.note || '') && !window.__wcViewer.remote.controllable, { timeout: 15000 });
+    const reason = await host.evaluate(() => window.__wc.state.control.error);
+    await host.evaluate(async (url) => { await chrome.tabs.update((await chrome.tabs.query({ windowId: window.__wc.state.windowId, active: true }))[0].id, { url }); }, `${base}__target.html`);
+    await target.waitForFunction(() => location.pathname === '/__target.html', { timeout: 15000 }).catch(() => {});
+    await host.waitForFunction(() => window.__wc.state.control.attached, { timeout: 15000 });
+    check(true, 'a Chrome page shows the reason control is refused', `Chrome said: ${reason}`);
   });
 
   await step('a viewer with the wrong key is refused', async () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractFingerprint, computeProof, verifyProof, newNonce } from '../../shared/auth.js';
+import { extractFingerprint, computeProof, verifyProof, newNonce, fingerprintsFromStats, channelFingerprints } from '../../shared/auth.js';
 import { generateKey } from '../../shared/ids.js';
 
 const SDP = [
@@ -59,4 +59,41 @@ test('nonces are 16 random bytes in base64url', () => {
   const n = newNonce();
   assert.equal(Buffer.from(n, 'base64url').length, 16);
   assert.notEqual(n, newNonce());
+});
+
+const statsReport = (entries) => new Map(entries.map((e) => [e.id, e]));
+const connected = statsReport([
+  { id: 'T1', type: 'transport', dtlsState: 'connected', localCertificateId: 'C1', remoteCertificateId: 'C2' },
+  { id: 'C1', type: 'certificate', fingerprint: 'ab:cd', fingerprintAlgorithm: 'SHA-256' },
+  { id: 'C2', type: 'certificate', fingerprint: 'EF:01', fingerprintAlgorithm: 'sha-256' },
+]);
+
+test('fingerprints come from the certificates of the connected DTLS transport', () => {
+  assert.deepEqual(fingerprintsFromStats(connected), { local: 'sha-256 AB:CD', remote: 'sha-256 EF:01' });
+});
+
+test('no connected transport, a missing certificate or two transports give no fingerprints', () => {
+  assert.equal(fingerprintsFromStats(statsReport([{ id: 'T1', type: 'transport', dtlsState: 'connecting' }])), null);
+  assert.equal(fingerprintsFromStats(statsReport([
+    { id: 'T1', type: 'transport', dtlsState: 'connected', localCertificateId: 'C1', remoteCertificateId: 'C9' },
+    { id: 'C1', type: 'certificate', fingerprint: 'AB', fingerprintAlgorithm: 'sha-256' },
+  ])), null);
+  const two = new Map(connected);
+  two.set('T2', { id: 'T2', type: 'transport', dtlsState: 'connected', localCertificateId: 'C1', remoteCertificateId: 'C2' });
+  assert.equal(fingerprintsFromStats(two), null);
+});
+
+const fakePc = (report, localSdp, remoteSdp) => ({
+  getStats: async () => report,
+  localDescription: { sdp: localSdp },
+  remoteDescription: { sdp: remoteSdp },
+});
+const sdpWith = (fp) => `v=0\r\na=fingerprint:sha-256 ${fp}\r\n`;
+
+test('the channel fingerprints are the transport ones when the SDP agrees', async () => {
+  assert.deepEqual(await channelFingerprints(fakePc(connected, sdpWith('AB:CD'), sdpWith('EF:01'))), { local: 'sha-256 AB:CD', remote: 'sha-256 EF:01' });
+});
+
+test('an SDP that disagrees with the transport fails closed', async () => {
+  assert.equal(await channelFingerprints(fakePc(connected, sdpWith('AB:CD'), sdpWith('99:99'))), null);
 });

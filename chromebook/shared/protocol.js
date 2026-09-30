@@ -17,4 +17,7 @@ export const MSG = Object.freeze({
   NAV: 'nav',              // viewer -> host {a: back|forward|reload|go, text}
   TAB: 'tab',              // viewer -> host {a: activate|new|close|next|prev, id}
   BYE: 'bye',              // host -> viewer {reason: 'replaced'} before closing
+  DIALOG: 'dialog',        // host -> viewer {kind: alert|confirm|prompt|beforeunload, message, prompt}
+  DIALOG_CLOSED: 'dialog-closed', // host -> viewer
+  DIALOG_ANSWER: 'dialog-answer', // viewer -> host {accept, text}
 });

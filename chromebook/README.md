@@ -5,12 +5,12 @@ extension on the Chromebook shares the window and keeps the Chromebook awake. A 
 Googlebook dials in, shows the window in its own desktop window, and passes your mouse, trackpad and
 keyboard through.
 
-Status: version 0.1.0. Tested end to end on a Mac; the ChromeOS-specific parts still need a real
+Status: version 0.1.1. Tested end to end on a Mac; the ChromeOS-specific parts still need a real
 Chromebook (see [What to check first](#what-to-check-first)).
 
 ## Install on the Chromebook
 
-1. On the Chromebook, download `windowcast-chromebook-0.1.0.zip` from the
+1. On the Chromebook, download `windowcast-chromebook-0.1.1.zip` from the
    [latest release](https://github.com/kuscher/windowcast/releases).
 2. Open the zip in the Files app and copy the `windowcast` folder into **My files**. Leave it there:
    Chrome runs the extension from that folder.
@@ -51,6 +51,13 @@ offline, and reconnects when it's back. It works on your home network and away f
   reloads, and Ctrl+Tab switches tabs. In a normal window, Ctrl+T and Ctrl+W act on the viewer itself;
   in **full screen** they go to the Chromebook. Press and hold Esc to leave full screen.
 
+**When the Googlebook connects,** a magenta square flashes for a moment in the shared window. That's
+Windowcast checking which Chrome window is shared and where clicks land. If it can't tell, the Windowcast
+window on the Chromebook asks you to choose the window once.
+
+**To update,** download the new zip, replace the contents of the `windowcast` folder, and click the reload
+arrow on Windowcast's card in `chrome://extensions`.
+
 ## Limits
 
 - While the Googlebook is connected, the Chromebook shows "Windowcast started debugging this browser".
@@ -58,6 +65,12 @@ offline, and reconnects when it's back. It works on your home network and away f
   Googlebook reconnects.
 - Chrome's own pages, such as settings and the new tab page, and the Chrome Web Store can be seen but not
   controlled. The address field and tab list still work on them.
+- Chrome refuses remote control from an extension on a Chromebook managed by a school or company that
+  blocks extensions on some websites or turns off screenshots, and on any page that contains a frame from
+  another extension, as some password managers and writing assistants add. When that happens, the
+  Windowcast window and the Googlebook say which of these it is.
+- Page dialogs (alerts, confirmations, "Leave this page?") appear on the Googlebook, and you answer them
+  there.
 - Android and Linux app windows can be shared view-only.
 - The connection is set up through PeerJS's free public service. If it's down, the Googlebook waits
   until it's back.
@@ -79,8 +92,8 @@ offline, and reconnects when it's back. It works on your home network and away f
 
 These parts can only be tried on a real Chromebook:
 
-- Does a click land exactly where you clicked? If not, send the values under **Details** in the
-  Windowcast window.
+- Does a click land exactly where you clicked? If not, or if control stays off, send what **Details** in
+  the Windowcast window shows under **Chrome refused control** and **Recent events**.
 - Does the picture keep coming with the lid closed, with the Windowcast window minimized, and after the
   Chromebook sleeps and wakes?
 - Does the window picker open by itself after a restart?

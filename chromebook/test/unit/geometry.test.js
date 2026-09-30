@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { videoContentRect, normalizePointer, mapToPage, matchWindow } from '../../shared/geometry.js';
+import { videoContentRect, normalizePointer, mapToPage, expectedFrameSize, sizeCandidates, pageToFrame, detectMarker } from '../../shared/geometry.js';
 
 test('content rect fills the element when aspect ratios match', () => {
   assert.deepEqual(videoContentRect(800, 500, 1600, 1000), { x: 0, y: 0, w: 800, h: 500 });
@@ -50,28 +50,59 @@ test('a side panel narrows the page, and clicks on it count as browser UI', () =
   assert.equal(mapToPage(0.25, 0.5, frame, win, withPanel, 1).zone, 'page');
 });
 
+const limits = { maxWidth: 3840, maxHeight: 2400 };
 const windows = [
-  { id: 1, width: 1280, height: 800, type: 'normal' },
-  { id: 2, width: 1280, height: 800, type: 'normal' },
-  { id: 3, width: 900, height: 700, type: 'normal' },
+  { id: 1, width: 1280, height: 800 },
+  { id: 2, width: 1280, height: 800 },
+  { id: 3, width: 900, height: 700 },
 ];
 
-test('the nominated window wins when the frame matches it', () => {
-  assert.deepEqual(matchWindow(2560, 1600, windows, 2, 2), { id: 2, how: 'nominated' });
+test('the expected frame follows the window, the screen scale and the capture limits', () => {
+  assert.deepEqual(expectedFrameSize({ width: 1280, height: 800 }, 2, limits), { w: 2560, h: 1600 });
+  assert.deepEqual(expectedFrameSize({ width: 2560, height: 1600 }, 2, limits), { w: 3840, h: 2400 });
 });
 
-test('a unique size match is chosen without a nomination', () => {
-  assert.deepEqual(matchWindow(1800, 1400, windows, null, 2), { id: 3, how: 'unique' });
+test('only windows of the right size are candidates, the nominated one first', () => {
+  assert.deepEqual(sizeCandidates(2560, 1600, windows, 2, limits, 2), [2, 1]);
+  assert.deepEqual(sizeCandidates(2560, 1600, windows, 2, limits, null), [1, 2]);
+  assert.deepEqual(sizeCandidates(1800, 1400, windows, 2, limits, 1), [3]);
 });
 
-test('equal windows without a nomination are ambiguous', () => {
-  assert.deepEqual(matchWindow(2560, 1600, windows, null, 2), { id: 1, how: 'ambiguous' });
+test('a window with the same shape but another size is not a candidate', () => {
+  assert.deepEqual(sizeCandidates(1280, 800, [{ id: 1, width: 1280, height: 800 }], 2, limits, 1), []);
 });
 
-test('a downscaled frame still matches by aspect ratio', () => {
-  assert.deepEqual(matchWindow(1170, 910, windows, null, 2), { id: 3, how: 'unique' });
+test('pageToFrame undoes mapToPage, also with zoom and letterboxing', () => {
+  for (const [f, z, pg] of [[frame, 1, page], [{ w: 2000, h: 1000 }, 1, page], [frame, 1.25, { innerWidth: 1024, innerHeight: 569.6 }]]) {
+    const p = mapToPage(0.3, 0.6, f, win, pg, z);
+    const back = pageToFrame(p.x, p.y, f, win, pg, z);
+    assert.ok(Math.abs(back.x - 0.3) < 1e-9 && Math.abs(back.y - 0.6) < 1e-9, JSON.stringify({ f, z, back }));
+  }
 });
 
-test('no window matches an unrelated frame', () => {
-  assert.equal(matchWindow(1000, 1000, windows, 1, 2), null);
+function frameWith(w, h, rect) {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < data.length; i += 4) { data[i] = 120; data[i + 1] = 130; data[i + 2] = 140; data[i + 3] = 255; }
+  if (rect) {
+    for (let y = rect.y; y < rect.y + rect.h; y++) {
+      for (let x = rect.x; x < rect.x + rect.w; x++) {
+        const i = (y * w + x) * 4;
+        data[i] = 255; data[i + 1] = 0; data[i + 2] = 255;
+      }
+    }
+  }
+  return data;
+}
+const expected = { x: 0.4, y: 0.4, w: 0.2, h: 0.2 };
+
+test('the marker is found where the page should show it', () => {
+  assert.equal(detectMarker(frameWith(100, 60, { x: 40, y: 24, w: 20, h: 12 }), 100, 60, expected).found, true);
+});
+
+test('a marker in another place, no marker, or scattered magenta pixels do not count', () => {
+  assert.equal(detectMarker(frameWith(100, 60, { x: 5, y: 5, w: 20, h: 12 }), 100, 60, expected).found, false);
+  assert.equal(detectMarker(frameWith(100, 60, null), 100, 60, expected).found, false);
+  const noisy = frameWith(100, 60, null);
+  for (let k = 0; k < 12; k++) { const i = ((k * 7) % 60 * 100 + (k * 13) % 100) * 4; noisy[i] = 255; noisy[i + 1] = 0; noisy[i + 2] = 255; }
+  assert.equal(detectMarker(noisy, 100, 60, expected).found, false);
 });

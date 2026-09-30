@@ -2,14 +2,21 @@
 // viewer control the window's page through the DevTools protocol.
 import { PROTOCOL_VERSION, VIEWER_BASE_URL, AUTH_TIMEOUT_MS, MSG } from './shared/protocol.js';
 import { generateHostId, generateKey, isValidHostId, isValidKey, pairingLink } from './shared/ids.js';
-import { extractFingerprint, computeProof, verifyProof, newNonce } from './shared/auth.js';
-import { mapToPage, matchWindow } from './shared/geometry.js';
+import { channelFingerprints, computeProof, verifyProof, newNonce } from './shared/auth.js';
+import { mapToPage, sizeCandidates, pageToFrame, detectMarker } from './shared/geometry.js';
 import { toCdpKeyEvent } from './shared/keys.js';
 import { toUrlOrSearch } from './shared/nav.js';
 import { retryDelay } from './shared/retry.js';
+import { compactState } from './shared/limits.js';
+import { createInputQueue } from './shared/queue.js';
 
 const params = new URLSearchParams(location.search);
 const TEST = params.get('test') === 'pattern';
+// Automated tests only: real capture of a tab, auto-picked by Chrome's --auto-select-desktop-capture-source flag.
+const TEST_CAPTURE = params.get('test') === 'capture';
+const LIMITS = { maxWidth: 3840, maxHeight: 2400 };
+const MAX_PENDING = 3;
+const MAGENTA = { r: 255, g: 0, b: 255, a: 1 };
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const intOrNull = (v) => (v === null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
@@ -18,17 +25,22 @@ const state = {
   identity: null,
   settings: { keepAwake: true, autoStart: true },
   broker: 'connecting',            // connecting | online | reconnecting | offline
+  idTaken: false,                  // the broker keeps refusing our id: someone else holds it
   stream: null,
   track: null,
   label: '',
   title: '',
   tabs: [],
-  windowId: null,                  // Chrome window that receives input
-  windowHow: null,                 // nominated | unique | ambiguous | test
+  candidates: [],                  // Chrome windows the size of the shared frame, most likely first
+  guessTitle: '',
+  windowId: null,                  // the Chrome window proven to be the shared one; input goes here
+  windowHow: null,                 // verified | chosen | test
+  verifying: false,
+  verifyFailed: false,
   windowChoices: [],
   nominated: intOrNull(params.get('nominate')),
   viewer: null,                    // the authenticated session, if any
-  control: { tabId: null, attached: false, blocked: null, canceledBy: null },
+  control: { tabId: null, attached: false, blocked: null, error: '', canceledBy: null },
   stats: null,
   error: '',
 };
@@ -76,7 +88,8 @@ async function pick() {
   if (picking || TEST) return;
   picking = true;
   try {
-    const streamId = await new Promise((resolve) => chrome.desktopCapture.chooseDesktopMedia(['window'], (id) => resolve(id)));
+    const sources = TEST_CAPTURE ? ['tab'] : ['window'];
+    const streamId = await new Promise((resolve) => chrome.desktopCapture.chooseDesktopMedia(sources, (id) => resolve(id)));
     if (!streamId) return;
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
@@ -99,11 +112,12 @@ async function useStream(stream, { testWindowId } = {}) {
   state.stream = stream;
   state.track = track;
   state.label = track.label || '';
-  track.addEventListener('ended', () => { if (state.track === track) endShare(); });
+  track.addEventListener('ended', () => { if (state.track === track) endShare({ userStopped: false }); });
   $('preview').srcObject = stream;
   await chrome.storage.local.set({ wasSharing: true });
   applyKeepAwake();
   if (testWindowId !== undefined) {
+    state.candidates = [testWindowId];
     state.windowId = testWindowId;
     state.windowHow = 'test';
   } else {
@@ -126,18 +140,35 @@ async function previewSize() {
   return { w: v.videoWidth, h: v.videoHeight };
 }
 
-// The picker doesn't say which window was chosen, so match the frame against Chrome's windows.
+// The picker doesn't say which window was chosen. Windows of the right size become candidates; which one it
+// really is gets proven when a viewer connects (see verifyShared), because maximized windows all look alike.
 async function identifyWindow() {
   const { w, h } = await previewSize();
-  const all = await chrome.windows.getAll({ populate: true });
+  const all = await chrome.windows.getAll({ populate: true, windowTypes: ['normal', 'popup', 'app'] });
   const wins = all.filter((x) => x.id !== myWindowId && x.state !== 'minimized');
-  const match = w && h
-    ? matchWindow(w, h, wins.map(({ id, width, height }) => ({ id, width, height })), state.nominated, devicePixelRatio)
-    : null;
-  state.windowId = match ? match.id : null;
-  state.windowHow = match ? match.how : null;
-  state.windowChoices = wins.map((x) => ({ id: x.id, title: (x.tabs || []).find((t) => t.active)?.title || `Window ${x.id}` }));
+  const activeTabOf = (x) => ((x && x.tabs) || []).find((t) => t.active) || {};
+  // In the capture test a tab is captured instead of a window, so there the "window" is the tab's page area.
+  const sizeOf = (x) => (TEST_CAPTURE ? { width: activeTabOf(x).width, height: activeTabOf(x).height } : { width: x.width, height: x.height });
+  const sized = wins.map((x) => ({ id: x.id, ...sizeOf(x) })).filter((x) => x.width > 0 && x.height > 0);
+  let candidates = w && h && !TEST_CAPTURE ? sizeCandidates(w, h, sized, devicePixelRatio, LIMITS, state.nominated) : [];
+  if (!candidates.length && w && h) {
+    // Nothing has the expected size (another screen scale, a shadow in the picture): try the windows of the
+    // most similar shape. The marker check decides which one it really is.
+    const aspect = w / h;
+    candidates = sized
+      .map((x) => ({ id: x.id, off: Math.abs(x.width / x.height - aspect) / aspect }))
+      .filter((x) => x.off < 0.1)
+      .sort((a, b) => (a.id === state.nominated ? -1 : b.id === state.nominated ? 1 : a.off - b.off))
+      .map((x) => x.id);
+  }
+  state.candidates = candidates.slice(0, 4);
+  state.windowChoices = state.candidates.map((id) => ({ id, title: activeTabOf(wins.find((x) => x.id === id)).title || `Window ${id}` }));
+  state.guessTitle = state.windowChoices.length ? state.windowChoices[0].title : '';
+  state.windowId = null;
+  state.windowHow = null;
+  state.verifyFailed = false;
   boundsCache = null;
+  note(`shared a ${w}x${h} frame; ${state.candidates.length} candidate window(s)`);
 }
 
 function stopStream({ userStopped }) {
@@ -147,6 +178,11 @@ function stopStream({ userStopped }) {
   state.label = '';
   state.windowId = null;
   state.windowHow = null;
+  state.candidates = [];
+  state.windowChoices = [];
+  state.guessTitle = '';
+  state.verifyFailed = false;
+  state.control = { ...state.control, blocked: null, error: '' };
   if (t) { try { t.stop(); } catch { /* already stopped */ } }
   $('preview').srcObject = null;
   if (userStopped) chrome.storage.local.set({ wasSharing: false });
@@ -155,8 +191,10 @@ function stopStream({ userStopped }) {
   if (state.viewer?.sender) state.viewer.sender.replaceTrack(null).catch(() => {});
 }
 
-function endShare() {
-  stopStream({ userStopped: true });
+// userStopped is true only for this window's Stop button; a window that closes (or Chrome shutting down)
+// keeps "was sharing" so the picker comes back after a restart.
+function endShare({ userStopped }) {
+  stopStream({ userStopped });
   refreshSoon();
 }
 
@@ -165,6 +203,10 @@ function endShare() {
 let peer = null;
 let brokerAttempt = 0;
 let brokerTimer = null;
+let idRefusals = 0;
+
+// PeerJS keeps messages for unknown connections forever, and anyone can send them to our public id.
+setInterval(() => { if (peer && peer._lostMessages && peer._lostMessages.size > 20) peer._lostMessages.clear(); }, 30000);
 
 function setBroker(value) {
   if (value !== state.broker) note(`broker ${value}`);
@@ -183,7 +225,13 @@ function startBroker() {
   setBroker('connecting');
   const p = new Peer(state.identity.hostId, { debug: 1 });
   peer = p;
-  p.on('open', () => { if (peer !== p) return; brokerAttempt = 0; setBroker('online'); });
+  p.on('open', () => {
+    if (peer !== p) return;
+    brokerAttempt = 0;
+    idRefusals = 0;
+    state.idTaken = false;
+    setBroker('online');
+  });
   p.on('connection', (conn) => { if (peer === p) onConnection(conn); });
   p.on('disconnected', () => {
     if (peer !== p || p.destroyed) return;
@@ -195,7 +243,11 @@ function startBroker() {
     note(`broker error ${err.type}`);
     if (peer !== p) return;
     state.error = `Broker: ${err.type}`;
-    if (err.type === 'unavailable-id' || p.destroyed) scheduleBroker(startBroker);
+    if (err.type === 'unavailable-id') {
+      idRefusals += 1;
+      state.idTaken = idRefusals >= 3;
+      scheduleBroker(startBroker);
+    } else if (p.destroyed) scheduleBroker(startBroker);
     else if (p.disconnected) scheduleBroker(() => { if (peer === p && !p.destroyed) p.reconnect(); });
     render();
   });
@@ -208,25 +260,30 @@ window.addEventListener('online', () => {
 
 // ---------- viewer sessions ----------
 
-const failures = [];
+const sessions = new Set();
 
 function onConnection(conn) {
   note(`connection from ${conn.peer}`);
-  const now = Date.now();
-  while (failures.length && now - failures[0] > 60000) failures.shift();
-  if (failures.length >= 10) {
+  if (conn.serialization !== 'json') {
     conn.on('open', () => conn.close());
     return;
   }
+  const pending = [...sessions].filter((x) => !x.authed && !x.closed);
+  if (pending.length >= MAX_PENDING) closeSession(pending[0], 'too many pending');
   const s = {
-    conn, hostNonce: newNonce(), authed: false, closed: false,
-    pc: null, sender: null, hints: new Set(),
+    conn, hostNonce: newNonce(), authed: false, authing: false, failed: false, closed: false,
+    pc: null, sender: null, hints: new Set(), lastState: '',
   };
+  sessions.add(s);
   s.authTimer = setTimeout(() => { if (!s.authed) closeSession(s, 'auth-timeout'); }, AUTH_TIMEOUT_MS);
   conn.on('open', () => send(s, { t: MSG.HELLO, v: PROTOCOL_VERSION, nonce: s.hostNonce }));
-  conn.on('data', (m) => { onMessage(s, m).catch((e) => { state.error = String(e?.message || e); render(); }); });
+  conn.on('data', (m) => { onMessage(s, m).catch((e) => { note(`message error: ${e.message}`); }); });
   conn.on('close', () => closeSession(s, 'closed'));
-  conn.on('error', () => closeSession(s, 'error'));
+  conn.on('error', (err) => {
+    // A message over PeerJS's size limit is refused, not fatal; the state message is bounded anyway.
+    if (err && err.type === 'message-too-big') { note('a message was too big to send'); return; }
+    closeSession(s, 'error');
+  });
 }
 
 function send(s, msg) {
@@ -260,63 +317,74 @@ async function onMessage(s, m) {
     case MSG.ICE:
       if (m.candidate && s.pc) await s.pc.addIceCandidate(m.candidate).catch(() => {});
       break;
-    case MSG.INPUT: if (s === state.viewer) enqueue(() => onPointer(m)); break;
-    // (key, nav and tab messages are queued behind pointer input so they keep their order)
-    case MSG.KEY: if (s === state.viewer) enqueue(() => onKey(m.e)); break;
-    case MSG.NAV: if (s === state.viewer) enqueue(() => onNav(m)); break;
-    case MSG.TAB: if (s === state.viewer) enqueue(() => onTab(m)); break;
+    case MSG.INPUT: if (s === state.viewer) queue.push(() => onPointer(m), m.k === 'move' ? 'move' : 'act'); break;
+    case MSG.KEY: if (s === state.viewer) queue.push(() => onKey(m.e)); break;
+    // Toolbar and dialog commands don't go through the page, so they never wait behind stuck input.
+    case MSG.NAV: if (s === state.viewer) onNav(m).catch((e) => note(`nav failed: ${e.message}`)); break;
+    case MSG.TAB: if (s === state.viewer) onTab(m).catch((e) => note(`tab failed: ${e.message}`)); break;
+    case MSG.DIALOG_ANSWER: if (s === state.viewer) onDialogAnswer(m).catch((e) => note(`dialog failed: ${e.message}`)); break;
     default: break;
   }
 }
 
 async function authenticate(s, m) {
-  if (typeof m.nonce !== 'string' || m.nonce.length > 64) return;
-  const pc = s.conn.peerConnection;
-  const proofParams = {
-    hostNonce: s.hostNonce,
-    viewerNonce: m.nonce,
-    hostFingerprint: extractFingerprint(pc && pc.localDescription && pc.localDescription.sdp),
-    viewerFingerprint: extractFingerprint(pc && pc.remoteDescription && pc.remoteDescription.sdp),
-  };
-  const ok = Boolean(proofParams.hostFingerprint && proofParams.viewerFingerprint)
-    && await verifyProof(state.identity.key, 'viewer', proofParams, m.proof);
-  note(`auth ${ok ? 'ok' : 'failed'}`);
-  if (!ok) {
-    failures.push(Date.now());
-    send(s, { t: MSG.AUTH_FAIL });
-    setTimeout(() => closeSession(s, 'auth-failed'), 300);
-    return;
+  if (s.authing || s.failed || typeof m.nonce !== 'string' || m.nonce.length > 64) return;
+  s.authing = true;
+  try {
+    // Fingerprints of the certificates DTLS actually verified, not just what the SDP text says.
+    const fps = await channelFingerprints(s.conn.peerConnection);
+    if (s.closed) return;
+    const proofParams = {
+      hostNonce: s.hostNonce, viewerNonce: m.nonce,
+      hostFingerprint: fps ? fps.local : null, viewerFingerprint: fps ? fps.remote : null,
+    };
+    const ok = Boolean(fps) && await verifyProof(state.identity.key, 'viewer', proofParams, m.proof);
+    if (s.closed) return;
+    note(`auth ${ok ? 'ok' : 'failed'}`);
+    if (!ok) {
+      s.failed = true;
+      send(s, { t: MSG.AUTH_FAIL });
+      setTimeout(() => closeSession(s, 'auth-failed'), 300);
+      return;
+    }
+    const proof = await computeProof(state.identity.key, 'host', proofParams);
+    if (s.closed) return;
+    s.authed = true;
+    clearTimeout(s.authTimer);
+    send(s, { t: MSG.AUTH_OK, proof });
+    const previous = state.viewer;
+    releaseInput();
+    queue.reset();
+    state.viewer = s;
+    if (previous && previous !== s) {
+      send(previous, { t: MSG.BYE, reason: 'replaced' });
+      setTimeout(() => closeSession(previous, 'replaced'), 200);
+    }
+    state.control.canceledBy = null;
+    pulseStage();
+    await startMedia(s);
+    if (s.closed) return;
+    attachControl();
+    refreshSoon();
+  } finally {
+    s.authing = false;
   }
-  s.authed = true;
-  clearTimeout(s.authTimer);
-  send(s, { t: MSG.AUTH_OK, proof: await computeProof(state.identity.key, 'host', proofParams) });
-  const previous = state.viewer;
-  state.viewer = s;
-  if (previous && previous !== s) {
-    send(previous, { t: MSG.BYE, reason: 'replaced' });
-    setTimeout(() => closeSession(previous, 'replaced'), 200);
-  }
-  state.control.canceledBy = null;
-  pulseStage();
-  await startMedia(s);
-  await attachControl();
-  refreshSoon();
 }
 
 function closeSession(s, reason) {
   if (s.closed) return;
   note(`session closed: ${reason}`);
   s.closed = true;
+  sessions.delete(s);
   clearTimeout(s.authTimer);
   try { s.pc && s.pc.close(); } catch { /* ignore */ }
   try { s.conn.close(); } catch { /* ignore */ }
   if (state.viewer === s) {
     state.viewer = null;
-    releaseInput();
+    queue.reset();
     detachControl();
     state.stats = null;
   }
-  state.error = reason === 'closed' || reason === 'replaced' ? state.error : `Viewer: ${reason}`;
   render();
 }
 
@@ -379,25 +447,160 @@ async function activeTab() {
 
 let attaching = null;
 function attachControl() {
-  attaching = (attaching || Promise.resolve()).then(doAttach).catch(() => {});
+  attaching = (attaching || Promise.resolve()).then(doAttach).catch((e) => note(`attach error: ${e.message}`));
   return attaching;
 }
 
-async function doAttach() {
-  if (!state.viewer || state.windowId === null || state.control.canceledBy === state.viewer) return;
-  const tab = await activeTab();
-  if (!tab) return;
-  if (state.control.attached && state.control.tabId === tab.id) return;
-  await detachControl();
+// Chrome's reasons for refusing chrome.debugger.attach, in words a person can act on.
+function explainAttachError(message, tab) {
+  const m = String(message || '');
+  const url = tab && tab.url ? tab.url : '';
+  if (/Host access is restricted by policy/i.test(m)) {
+    return 'Remote control is blocked on this Chromebook. Its administrator restricts extensions on some websites, and then Chrome doesn’t let extensions control any page.';
+  }
+  if (/Screenshot capture is restricted by policy/i.test(m)) {
+    return 'Remote control is blocked on this Chromebook. Its administrator turned off screenshots, which also turns off remote control by extensions.';
+  }
+  if (/restricted on this target/i.test(m)) return 'Your organization’s data protection rules block remote control on this page.';
+  if (/ExtensionsSettings policy/i.test(m)) return 'Your organization blocks extensions on this website, so it can’t be controlled remotely.';
+  if (/URL of different extension/i.test(m)) {
+    return 'Another extension shows its own frame inside this page, and Chrome doesn’t let Windowcast control such pages. Try another page, or turn off extensions that add frames to pages, such as password managers or writing assistants.';
+  }
+  if (/chrome:\/\/ URL/i.test(m) || /^(chrome|chrome-untrusted|devtools|chrome-search):/i.test(url)) {
+    return `This is one of Chrome’s own pages${url ? ` (${url.slice(0, 60)})` : ''}, which can’t be controlled. Open a website in the shared window.`;
+  }
+  if (/Cannot attach to this target/i.test(m)) return 'Chrome is showing a warning page here, which can’t be controlled.';
+  if (/already attached/i.test(m)) return 'Chrome’s developer tools or another extension is controlling this tab. Close them, then reconnect.';
+  if (/Cannot access contents of the page/i.test(m)) return 'Chrome doesn’t let extensions control this page.';
+  return `Remote control isn’t possible on this page. Chrome said: ${m}`;
+}
+
+async function tryAttach(tabId) {
   try {
-    await chrome.debugger.attach({ tabId: tab.id }, '1.3');
-    state.control = { ...state.control, tabId: tab.id, attached: true, blocked: null };
-    metricsCache.delete(tab.id);
+    await chrome.debugger.attach({ tabId }, '1.3');
+    return null;
   } catch (e) {
-    note(`attach failed: ${e.message}`);
-    state.control = { ...state.control, tabId: tab.id, attached: false, blocked: 'This page can’t be controlled remotely. Chrome’s own pages and the Web Store are off limits.' };
+    return e && e.message ? e.message : String(e);
+  }
+}
+
+function useAttached(tab) {
+  state.control = { ...state.control, tabId: tab.id, attached: true, blocked: null, error: '' };
+  sizeCache.delete(tab.id);
+  cdp(tab.id, 'Page.enable').catch(() => {});  // for page dialogs
+}
+
+async function grabFrame() {
+  if (typeof ImageCapture === 'undefined' || !state.track || state.track.readyState !== 'live') return null;
+  return new ImageCapture(state.track).grabFrame();
+}
+
+// Draws a magenta square into the tab through the DevTools overlay and looks for it in the shared picture.
+// Seeing it proves this window is the shared one, and that clicks will land where they should.
+async function markerVisible(windowId, tab) {
+  const tabId = tab.id;
+  const zoom = await tabZoom(tabId);
+  const size = await pageSize(tabId);
+  const page = { innerWidth: size.width / zoom, innerHeight: size.height / zoom };
+  const rect = {
+    x: Math.round(page.innerWidth * 0.4), y: Math.round(page.innerHeight * 0.4),
+    width: Math.max(8, Math.round(page.innerWidth * 0.2)), height: Math.max(8, Math.round(page.innerHeight * 0.2)),
+  };
+  let bitmap = null;
+  await cdp(tabId, 'DOM.enable');
+  await cdp(tabId, 'Overlay.enable');
+  try {
+    await cdp(tabId, 'Overlay.highlightRect', { ...rect, color: MAGENTA, outlineColor: MAGENTA });
+    await sleep(300);
+    bitmap = await grabFrame();
+  } finally {
+    await cdp(tabId, 'Overlay.hideHighlight').catch(() => {});
+    await cdp(tabId, 'Overlay.disable').catch(() => {});
+    await cdp(tabId, 'DOM.disable').catch(() => {});
+  }
+  if (!bitmap) return false;
+  const win = await windowSize(windowId);
+  const frame = { w: bitmap.width, h: bitmap.height };
+  const a = pageToFrame(rect.x, rect.y, frame, win, page, zoom);
+  const b = pageToFrame(rect.x + rect.width, rect.y + rect.height, frame, win, page, zoom);
+  const W = 160;
+  const H = Math.max(1, Math.round((W * frame.h) / frame.w));
+  const canvas = new OffscreenCanvas(W, H);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0, W, H);
+  if (bitmap.close) bitmap.close();
+  const found = detectMarker(ctx.getImageData(0, 0, W, H).data, W, H, { x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y });
+  note(`marker in window ${windowId}: ${found.found ? 'seen' : 'not seen'} (${found.inside}/${found.total})`);
+  return found.found;
+}
+
+async function verifyShared(s) {
+  state.verifying = true;
+  render();
+  let firstError = null;
+  let firstTab = null;
+  for (const windowId of state.candidates.slice(0, 4)) {
+    if (state.viewer !== s || !state.track) break;
+    const [tab] = await chrome.tabs.query({ windowId, active: true });
+    if (!tab) continue;
+    const error = await tryAttach(tab.id);
+    if (error) {
+      note(`attach to window ${windowId} failed: ${error}`);
+      if (!firstError) { firstError = error; firstTab = tab; }
+      continue;
+    }
+    let seen = false;
+    try { seen = await markerVisible(windowId, tab); } catch (e) { note(`marker check failed: ${e.message}`); }
+    if (seen && state.viewer === s) {
+      state.windowId = windowId;
+      state.windowHow = 'verified';
+      useAttached(tab);
+      break;
+    }
+    await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
+  }
+  state.verifying = false;
+  if (state.windowId === null) {
+    state.verifyFailed = true;
+    state.control = {
+      ...state.control, attached: false,
+      blocked: firstError ? explainAttachError(firstError, firstTab) : null, error: firstError || '',
+    };
   }
   refreshSoon();
+}
+
+async function doAttach() {
+  const s = state.viewer;
+  if (!s || !state.track || state.control.canceledBy === s) return;
+  if (state.windowId === null) {
+    if (state.candidates.length && !state.verifyFailed && !state.verifying) await verifyShared(s);
+    return;
+  }
+  const tab = await activeTab();
+  if (!tab || state.viewer !== s) return;
+  if (state.control.attached && state.control.tabId === tab.id) return;
+  await detachControl();
+  const error = await tryAttach(tab.id);
+  if (state.viewer !== s) {
+    if (!error) await chrome.debugger.detach({ tabId: tab.id }).catch(() => {});
+    return;
+  }
+  if (error) {
+    note(`attach failed: ${error}`);
+    state.control = { ...state.control, tabId: tab.id, attached: false, blocked: explainAttachError(error, tab), error };
+  } else {
+    useAttached(tab);
+  }
+  refreshSoon();
+}
+
+// Try again after the page changes, when the last try found no window or was refused on that page.
+function retryControlSoon() {
+  if (!state.viewer) return;
+  if (state.windowId === null) state.verifyFailed = false;
+  clearTimeout(retryControlSoon.timer);
+  retryControlSoon.timer = setTimeout(attachControl, 500);
 }
 
 // Debugger sessions belong to the extension, not to this page, so a session from an earlier host
@@ -410,10 +613,28 @@ async function releaseStaleSessions() {
 }
 
 async function detachControl() {
+  releaseInput();
   if (!state.control.attached) return;
   const tabId = state.control.tabId;
   state.control = { ...state.control, attached: false };
   try { await chrome.debugger.detach({ tabId }); } catch { /* already detached */ }
+}
+
+chrome.debugger.onEvent.addListener((source, method, p) => {
+  if (source.tabId !== state.control.tabId || !state.viewer) return;
+  if (method === 'Page.javascriptDialogOpening') {
+    note(`page dialog: ${p.type}`);
+    send(state.viewer, { t: MSG.DIALOG, kind: p.type, message: String(p.message || '').slice(0, 1000), prompt: String(p.defaultPrompt || '').slice(0, 500) });
+  } else if (method === 'Page.javascriptDialogClosed') {
+    send(state.viewer, { t: MSG.DIALOG_CLOSED });
+  }
+});
+
+async function onDialogAnswer(m) {
+  if (!state.control.attached) return;
+  await cdp(state.control.tabId, 'Page.handleJavaScriptDialog', {
+    accept: Boolean(m.accept), promptText: typeof m.text === 'string' ? m.text.slice(0, 2000) : '',
+  });
 }
 
 chrome.debugger.onDetach.addListener((source, reason) => {
@@ -430,27 +651,48 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 // ---------- input ----------
 
-let inputChain = Promise.resolve();
-function enqueue(fn) {
-  inputChain = inputChain.then(fn).catch((e) => { note(`input error ${e.message}`); state.error = `Input: ${e.message}`; });
+const queue = createInputQueue({
+  onTimeout: () => {
+    note('the page stopped responding; queued input was dropped');
+    notice('The page on the Chromebook isn’t responding, so your last input was dropped.');
+  },
+  onError: (e) => note(`input error: ${e.message}`),
+});
+
+// A window's size in DIP. In the capture test a tab is captured instead of a window, so there the "window"
+// is the tab's page area.
+async function windowSize(windowId) {
+  if (TEST_CAPTURE) {
+    const [tab] = await chrome.tabs.query({ windowId, active: true });
+    return { width: tab.width, height: tab.height };
+  }
+  const w = await chrome.windows.get(windowId);
+  return { width: w.width, height: w.height };
 }
 
 let boundsCache = null;
 async function windowBounds() {
   if (boundsCache && boundsCache.id === state.windowId && Date.now() - boundsCache.at < 2000) return boundsCache.value;
-  const w = await chrome.windows.get(state.windowId);
-  boundsCache = { id: state.windowId, at: Date.now(), value: { width: w.width, height: w.height } };
+  boundsCache = { id: state.windowId, at: Date.now(), value: await windowSize(state.windowId) };
   return boundsCache.value;
 }
 
-const metricsCache = new Map();
-async function pageMetrics(tabId) {
-  const cached = metricsCache.get(tabId);
-  if (cached && Date.now() - cached.at < 1000) return cached.value;
-  const r = await cdp(tabId, 'Runtime.evaluate', { expression: '[innerWidth, innerHeight]', returnByValue: true });
-  const [innerWidth, innerHeight] = r.result.value;
-  const value = { innerWidth, innerHeight };
-  metricsCache.set(tabId, { at: Date.now(), value });
+// The page area's size in DIP comes from the tab itself, so a page can't lie about it.
+const sizeCache = new Map();
+async function pageSize(tabId) {
+  const cached = sizeCache.get(tabId);
+  if (cached && Date.now() - cached.at < 500) return cached.value;
+  const t = await chrome.tabs.get(tabId);
+  let value;
+  if (t.width > 0 && t.height > 0) {
+    value = { width: t.width, height: t.height };
+  } else {
+    const m = await cdp(tabId, 'Page.getLayoutMetrics');
+    const zoom = await tabZoom(tabId);
+    value = { width: m.cssLayoutViewport.clientWidth * zoom, height: m.cssLayoutViewport.clientHeight * zoom };
+  }
+  if (!(value.width > 0 && value.height > 0 && value.width < 20000 && value.height < 20000)) throw new Error('page size unknown');
+  sizeCache.set(tabId, { at: Date.now(), value });
   return value;
 }
 
@@ -463,7 +705,9 @@ async function tabZoom(tabId) {
 const BUTTONS = ['left', 'middle', 'right', 'back', 'forward'];
 const MASK = { left: 1, right: 2, middle: 4, back: 8, forward: 16 };
 let pressed = 0;
+let pressedTab = null;
 let lastPoint = null;
+const heldKeys = new Map();  // code -> {tabId, event}
 
 const num = (v, lo, hi) => (typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : null);
 
@@ -474,8 +718,8 @@ async function pagePoint(m) {
   const y = num(m.y, 0, 1);
   if (fw === null || fh === null || x === null || y === null) return { zone: 'outside' };
   const tabId = state.control.tabId;
-  const [win, metrics, zoom] = await Promise.all([windowBounds(), pageMetrics(tabId), tabZoom(tabId)]);
-  return mapToPage(x, y, { w: fw, h: fh }, win, metrics, zoom);
+  const [win, size, zoom] = await Promise.all([windowBounds(), pageSize(tabId), tabZoom(tabId)]);
+  return mapToPage(x, y, { w: fw, h: fh }, win, { innerWidth: size.width / zoom, innerHeight: size.height / zoom }, zoom);
 }
 
 async function onPointer(m) {
@@ -503,6 +747,7 @@ async function onPointer(m) {
     if (target.zone !== 'page') return;
     const button = BUTTONS[m.b] || 'left';
     pressed |= MASK[button];
+    pressedTab = tabId;
     lastPoint = target;
     await cdp(tabId, 'Input.dispatchMouseEvent', {
       type: 'mousePressed', x: target.x, y: target.y, modifiers, button, buttons: pressed, clickCount: num(m.n, 1, 3) || 1,
@@ -533,19 +778,30 @@ async function onKey(e) {
     location: num(e.location, 0, 3) || 0, repeat: Boolean(e.repeat),
     alt: Boolean(e.alt), ctrl: Boolean(e.ctrl), meta: Boolean(e.meta), shift: Boolean(e.shift),
   };
-  await cdp(state.control.tabId, 'Input.dispatchKeyEvent', toCdpKeyEvent(clean));
+  const tabId = state.control.tabId;
+  const event = toCdpKeyEvent(clean);
+  await cdp(tabId, 'Input.dispatchKeyEvent', event);
+  if (event.type === 'keyUp') heldKeys.delete(clean.code);
+  else heldKeys.set(clean.code, { tabId, event });
 }
 
-// Lift any button still held when the viewer goes away, so nothing stays pressed on the Chromebook.
+// Lift every key and button still held (viewer gone, replaced, or control moving), sent to the tab that got
+// the press, so nothing stays pressed on the Chromebook.
 function releaseInput() {
-  const tabId = state.control.tabId;
-  if (!state.control.attached || !pressed || !lastPoint) { pressed = 0; return; }
-  for (const [name, bit] of Object.entries(MASK)) {
-    if (pressed & bit) {
+  for (const [, held] of heldKeys) {
+    const { text, unmodifiedText, ...up } = held.event;
+    cdp(held.tabId, 'Input.dispatchKeyEvent', { ...up, type: 'keyUp', autoRepeat: false }).catch(() => {});
+  }
+  heldKeys.clear();
+  if (pressed && pressedTab !== null && lastPoint) {
+    for (const [name, bit] of Object.entries(MASK)) {
+      if (!(pressed & bit)) continue;
       pressed &= ~bit;
-      cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: lastPoint.x, y: lastPoint.y, button: name, buttons: pressed, clickCount: 1 }).catch(() => {});
+      cdp(pressedTab, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: lastPoint.x, y: lastPoint.y, button: name, buttons: pressed, clickCount: 1 }).catch(() => {});
     }
   }
+  pressed = 0;
+  pressedTab = null;
 }
 
 // ---------- toolbar commands ----------
@@ -560,6 +816,10 @@ async function onNav(m) {
   else if (m.a === 'go') {
     const target = toUrlOrSearch(str(m.text, 4096));
     if (!target) return;
+    if (target.kind === 'blocked') {
+      notice('Windowcast opens only web addresses. Chrome’s own pages, files and scripts are off limits.');
+      return;
+    }
     if (target.kind === 'url') await chrome.tabs.update(tab.id, { url: target.url });
     else await chrome.search.query({ text: target.query, tabId: tab.id });
   }
@@ -574,7 +834,8 @@ async function onTab(m) {
   if (m.a === 'activate' && owns(m.id)) await chrome.tabs.update(m.id, { active: true });
   else if (m.a === 'new') await chrome.tabs.create({ windowId: state.windowId, active: true });
   else if (m.a === 'close') {
-    const id = owns(m.id) ? m.id : tabs[index] && tabs[index].id;
+    // No id means the active tab; an id that's gone or belongs elsewhere means nothing.
+    const id = m.id === undefined || m.id === null ? tabs[index] && tabs[index].id : owns(m.id) ? m.id : undefined;
     // Closing the last tab would close the shared window and end sharing.
     if (id !== undefined && tabs.length > 1) await chrome.tabs.remove(id);
     else if (tabs.length <= 1) notice('That’s the last tab. Closing it would end sharing, so it stays open.');
@@ -588,9 +849,11 @@ async function onTab(m) {
 
 function controlNote() {
   if (!state.track) return null;
-  if (state.windowId === null) return 'View only. Only Chrome windows can be controlled from your Googlebook.';
   if (state.control.canceledBy && state.control.canceledBy === state.viewer) return 'Remote control was turned off on the Chromebook. It comes back when your Googlebook reconnects.';
-  if (state.viewer && state.control.blocked) return state.control.blocked;
+  if (state.verifying) return 'Checking which window is shared.';
+  if (state.control.blocked) return state.control.blocked;
+  if (state.windowId === null && state.verifyFailed) return 'View only. The shared window doesn’t look like one of this Chromebook’s Chrome windows.';
+  if (state.windowId === null && !state.candidates.length) return 'View only. Only Chrome windows can be controlled from your Googlebook.';
   return null;
 }
 
@@ -620,23 +883,34 @@ async function refresh() {
   const s = state.viewer;
   if (s && s.authed) {
     const active = state.tabs.find((t) => t.active);
-    send(s, {
-      t: MSG.STATE, sharing: Boolean(state.track), title: state.title || state.label || '',
+    const message = compactState({
+      t: MSG.STATE, sharing: Boolean(state.track), title: state.title || state.guessTitle || state.label || '',
       controllable: state.control.attached, note: controlNote(), tabs: state.tabs, url: active ? active.url : '',
     });
+    const text = JSON.stringify(message);
+    if (text !== s.lastState) {
+      s.lastState = text;
+      send(s, message);
+    }
   }
 }
 
 chrome.tabs.onActivated.addListener(({ windowId }) => {
-  if (windowId !== state.windowId) return;
-  attachControl();
-  refreshSoon();
+  if (windowId === state.windowId) {
+    attachControl();
+    refreshSoon();
+  } else if (state.windowId === null && state.candidates.includes(windowId)) {
+    retryControlSoon();
+  }
 });
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-  if (tab.windowId !== state.windowId) return;
-  if (info.status === 'loading') metricsCache.delete(tabId);
-  if (tab.active && info.status === 'complete' && !state.control.attached) attachControl();
-  refreshSoon();
+  if (info.status === 'loading') sizeCache.delete(tabId);
+  if (tab.windowId === state.windowId) {
+    if (tab.active && info.status === 'complete' && !state.control.attached) retryControlSoon();
+    refreshSoon();
+  } else if (state.windowId === null && state.candidates.includes(tab.windowId) && tab.active && info.status === 'complete') {
+    retryControlSoon();
+  }
 });
 chrome.tabs.onCreated.addListener((tab) => { if (tab.windowId === state.windowId) refreshSoon(); });
 chrome.tabs.onRemoved.addListener((tabId, info) => { if (info.windowId === state.windowId) refreshSoon(); });
@@ -667,7 +941,7 @@ function render() {
   broker.dataset.state = state.broker;
   broker.textContent = { connecting: 'Connecting', online: 'Online', reconnecting: 'Reconnecting', offline: 'Offline' }[state.broker];
   $('stage').dataset.state = !sharing ? 'idle' : live ? 'live' : 'sharing';
-  $('title').textContent = sharing ? (state.title || state.label || 'Shared window') : 'Choose a window to share';
+  $('title').textContent = sharing ? (state.title || state.guessTitle || 'Shared window') : 'Choose a window to share';
   document.title = sharing ? `Sharing ${state.title || 'a window'} – Windowcast` : 'Windowcast';
 
   const status = $('status');
@@ -677,6 +951,9 @@ function render() {
   } else if (live) {
     status.textContent = 'Your Googlebook is connected.';
     status.dataset.tone = 'live';
+  } else if (state.idTaken) {
+    status.textContent = 'Another device is using this Chromebook’s pairing ID, so your Googlebook can’t reach it. Make a new pairing link to fix it.';
+    status.dataset.tone = 'warn';
   } else if (state.broker !== 'online') {
     status.textContent = 'Waiting for the internet. Your Googlebook can’t reach this Chromebook until it’s back.';
     status.dataset.tone = 'warn';
@@ -686,19 +963,25 @@ function render() {
   }
 
   const note = controlNote();
-  const ambiguous = sharing && state.windowHow === 'ambiguous';
-  $('control').hidden = !note && !ambiguous;
-  $('control-text').textContent = note || (ambiguous ? `Two windows look the same, so the Googlebook controls “${state.title || 'this window'}”.` : '');
-  $('control-pick-wrap').hidden = !ambiguous;
-  if (ambiguous) {
+  // When the check can't prove which window is shared, let the person at the Chromebook say it.
+  const offerChoice = sharing && state.windowId === null && state.verifyFailed && !state.control.blocked && state.windowChoices.length > 0;
+  $('control').hidden = !note && !state.idTaken;
+  $('control-text').textContent = note || '';
+  $('fix-id').hidden = !state.idTaken;
+  $('control-pick-wrap').hidden = !offerChoice;
+  if (offerChoice) {
     const select = $('control-pick');
     select.replaceChildren(...state.windowChoices.map((c) => {
       const o = document.createElement('option');
       o.value = String(c.id);
       o.textContent = c.title;
-      o.selected = c.id === state.windowId;
       return o;
     }));
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = 'Choose the shared window';
+    none.selected = true;
+    select.prepend(none);
   }
 
   $('pick').textContent = sharing ? 'Share a different window' : 'Choose a window';
@@ -716,8 +999,8 @@ function renderDiag() {
   const rows = [
     ['Host id', state.identity ? state.identity.hostId : ''],
     ['Broker', state.broker],
-    ['Controlled window', state.windowId === null ? 'none' : `${state.windowId} (${state.windowHow})`],
-    ['Controlled tab', state.control.attached ? String(state.control.tabId) : 'not attached'],
+    ['Shared window', state.windowId === null ? `not confirmed (${state.candidates.length} candidate${state.candidates.length === 1 ? '' : 's'})` : `${state.windowId}, ${state.windowHow}`],
+    ['Controlled tab', state.control.attached ? `${state.control.tabId} ${(state.tabs.find((t) => t.active) || {}).url || ''}` : 'not attached'],
     ['Frame', $('preview').videoWidth ? `${$('preview').videoWidth} × ${$('preview').videoHeight}` : ''],
     ['Screen scale', String(devicePixelRatio)],
   ];
@@ -728,7 +1011,9 @@ function renderDiag() {
     rows.push(['Path', `${st.path || '?'}, round trip ${st.rtt != null ? Math.round(st.rtt * 1000) : '?'} ms`]);
     if (st.limit && st.limit !== 'none') rows.push(['Limited by', st.limit]);
   }
+  if (state.control.error) rows.push(['Chrome refused control', state.control.error]);
   if (state.error) rows.push(['Last problem', state.error]);
+  rows.push(['Recent events', events.slice(-8).join('\n')]);
   $('diag').replaceChildren(...rows.flatMap(([k, v]) => {
     const dt = document.createElement('dt');
     dt.textContent = k;
@@ -771,7 +1056,7 @@ setInterval(() => { collectStats().then(renderDiag).catch(() => {}); }, 2000);
 
 function bindUi() {
   $('pick').addEventListener('click', () => pick());
-  $('stop').addEventListener('click', () => endShare());
+  $('stop').addEventListener('click', () => endShare({ userStopped: true }));
   $('copy').addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(currentLink());
@@ -790,12 +1075,15 @@ function bindUi() {
     await saveSettings();
   });
   $('control-pick').addEventListener('change', (e) => {
+    if (!e.target.value) return;
     state.windowId = Number(e.target.value);
-    state.windowHow = 'nominated';
+    state.windowHow = 'chosen';
+    state.verifyFailed = false;
     boundsCache = null;
     detachControl().then(attachControl);
     refreshSoon();
   });
+  $('fix-id').addEventListener('click', () => $('rekey').click());
   $('rekey').addEventListener('click', async () => {
     if (!window.confirm('Make a new pairing link? Your Googlebook disconnects until you open the new link on it.')) return;
     state.identity = { hostId: generateHostId(), key: generateKey() };
@@ -810,7 +1098,6 @@ function bindUi() {
 // ---------- test pattern (automated tests only) ----------
 
 async function startTestPattern() {
-  window.__wc = { state, link: () => currentLink(), events };
   const targetUrl = params.get('targetUrl');
   let tab = null;
   for (let i = 0; i < 40 && !tab; i++) {
@@ -845,9 +1132,10 @@ async function init() {
   await loadIdentity();
   bindUi();
   render();
+  if (TEST || TEST_CAPTURE) window.__wc = { state, link: () => currentLink(), events };
   startBroker();
   if (TEST) await startTestPattern();
-  else if (state.nominated !== null || params.get('auto') === '1') pick();
+  else if (TEST_CAPTURE || state.nominated !== null || params.get('auto') === '1') pick();
 }
 
 init().catch((e) => {

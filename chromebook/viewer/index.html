@@ -53,10 +53,25 @@
       <h1 id="ov-title">Connecting to your Chromebook</h1>
       <p id="ov-body"></p>
       <p id="ov-meta" class="meta"></p>
-      <button id="ov-action" class="action" type="button" hidden></button>
+      <div class="ov-actions">
+        <button id="ov-action" class="action" type="button" hidden></button>
+        <button id="ov-secondary" class="secondary" type="button" hidden></button>
+      </div>
     </div>
     <div id="toast" class="toast" role="status" hidden></div>
   </main>
+
+  <dialog id="page-dialog" class="page-dialog">
+    <form method="dialog">
+      <p id="pd-title" class="pd-title"></p>
+      <p id="pd-message" class="pd-message"></p>
+      <input id="pd-input" type="text" autocomplete="off" aria-label="Answer" hidden>
+      <div class="pd-actions">
+        <button id="pd-cancel" value="cancel" type="submit">Cancel</button>
+        <button id="pd-ok" value="ok" type="submit" class="action">OK</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="lib/peerjs.min.js"></script>
   <script type="module" src="viewer.js"></script>
