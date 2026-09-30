@@ -8,5 +8,5 @@ node build.mjs
 mkdir -p .vercel-viewer
 rsync -a --delete --exclude .vercel dist/viewer/ .vercel-viewer/
 cd .vercel-viewer
-[ -f .vercel/project.json ] || vercel link --yes --project windowcast-viewer
-vercel deploy --prod --yes
+[ -f .vercel/project.json ] || vercel link --yes --project windowcast-viewer --scope alexkuscher-6326s-projects
+vercel deploy --prod --yes --scope alexkuscher-6326s-projects

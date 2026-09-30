@@ -30,6 +30,8 @@ const server = http.createServer(async (req, res) => {
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}/`;
+// VIEWER_URL=https://windowcast-viewer.vercel.app/ tests the deployed viewer (with its security headers) instead of the local copy.
+const viewerBase = process.env.VIEWER_URL || base;
 
 const results = [];
 function check(ok, name, info = '') {
@@ -80,7 +82,7 @@ try {
   const targetUrl = target.url();
 
   host = await browser.newPage({ type: 'window', windowBounds: { width: 460, height: 800 } });
-  await host.goto(`chrome-extension://${extId}/host.html?test=pattern&targetUrl=${encodeURIComponent(targetUrl)}&viewer=${encodeURIComponent(base)}`);
+  await host.goto(`chrome-extension://${extId}/host.html?test=pattern&targetUrl=${encodeURIComponent(targetUrl)}&viewer=${encodeURIComponent(viewerBase)}`);
   await host.waitForFunction(() => window.__wc && window.__wc.state.broker === 'online' && window.__wc.state.track, { timeout: 40000 });
   check(true, 'host registers with the broker and shares the target window');
   const link = await host.evaluate(() => window.__wc.link());
