@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Share one Chromebook window and control it from a Googlebook.",
   "scripts": {
-    "test": "node --test test/unit/",
+    "test": "node --test \"test/unit/*.test.js\"",
     "build": "node build.mjs",
     "e2e": "node test/e2e/run.mjs"
   },
