@@ -23,3 +23,9 @@ keystore.pass
 *.iml
 .vscode/
 spikes/**/out/
+
+# Chromebook quick host
+chromebook/dist/
+chromebook/node_modules/
+chromebook/test/e2e/.profile/
+chromebook/test/e2e/artifacts/
