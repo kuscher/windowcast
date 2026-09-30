@@ -1,6 +1,6 @@
 // Message names and constants shared by the extension (host) and the viewer.
 export const PROTOCOL_VERSION = 1;
-export const VIEWER_BASE_URL = 'https://kuscher.github.io/windowcast/';
+export const VIEWER_BASE_URL = 'https://windowcast-viewer.vercel.app/';
 export const AUTH_TIMEOUT_MS = 10000;
 
 export const MSG = Object.freeze({

@@ -1,0 +1,51 @@
+name: chromebook
+
+on:
+  push:
+    branches: [main]
+    paths: ['chromebook/**', '.github/workflows/chromebook.yml']
+    tags: ['chromebook-v*']
+  pull_request:
+    paths: ['chromebook/**']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unit tests
+        working-directory: chromebook
+        run: node --test test/unit/
+      - name: Build
+        working-directory: chromebook
+        run: node build.mjs
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/chromebook-v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build and zip the extension
+        working-directory: chromebook
+        run: |
+          node build.mjs
+          version="${GITHUB_REF_NAME#chromebook-v}"
+          manifest_version="$(node -p "require('./dist/extension/manifest.json').version")"
+          test "$version" = "$manifest_version" || { echo "tag $version does not match manifest $manifest_version"; exit 1; }
+          cd dist && mv extension windowcast && zip -qr "../windowcast-chromebook-${version}.zip" windowcast
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#chromebook-v}"
+          gh release create "$GITHUB_REF_NAME" "chromebook/windowcast-chromebook-${version}.zip" \
+            --title "Windowcast for Chromebook ${version}" --notes-file chromebook/RELEASE_NOTES.md

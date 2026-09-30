@@ -6,6 +6,13 @@ ScreenCaptureKit and streams it over WebRTC; a Kotlin/Jetpack Compose client
 shows it as an ordinary resizable Android window with your keyboard, trackpad
 and mouse passed through.
 
+## Windowcast for Chromebook (quick version)
+
+A Chrome extension that shares one Chromebook window, keeps the Chromebook awake, and lets you see and
+control that window from your Googlebook at any time. Install and use: [chromebook/README.md](chromebook/README.md).
+
+## Mac host
+
 Status: design phase. The design is in
 [docs/superpowers/specs/2026-09-27-windowcast-design.md](docs/superpowers/specs/2026-09-27-windowcast-design.md).
 

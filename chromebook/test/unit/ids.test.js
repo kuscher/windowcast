@@ -28,8 +28,8 @@ test('keys are 32 random bytes in base64url', () => {
 test('a pairing link round-trips through its fragment', () => {
   const id = generateHostId();
   const key = generateKey();
-  const link = pairingLink('https://kuscher.github.io/windowcast/', id, key);
-  assert.equal(link, `https://kuscher.github.io/windowcast/#h=${id}&k=${key}`);
+  const link = pairingLink('https://windowcast-viewer.vercel.app/', id, key);
+  assert.equal(link, `https://windowcast-viewer.vercel.app/#h=${id}&k=${key}`);
   assert.deepEqual(parsePairingFragment(new URL(link).hash), { hostId: id, key });
 });
 

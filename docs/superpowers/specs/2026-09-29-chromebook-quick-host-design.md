@@ -30,7 +30,7 @@ Android or Linux app windows (they stream view-only), a Web Store listing.
 ```
 Chromebook                                       Googlebook (Chrome, installed web app)
 +------------------------------------+           +----------------------------------+
-| Extension (Manifest V3)            |           | Viewer (GitHub Pages)            |
+| Extension (Manifest V3)            |           | Viewer (Vercel)            |
 |  service worker: icon click,       |           |  PeerJS peer (random id)         |
 |    startup, opens the host window  |           |  control connection -> auth      |
 |  host window (extension page):     |<--broker->|  own RTCPeerConnection: video    |
@@ -55,7 +55,7 @@ Chromebook                                       Googlebook (Chrome, installed w
   sets `jitterBufferTarget` 0.
 - **Pairing.** On install the extension creates a host id `wc-` plus 26
   base32 characters and a 32-byte key. The pairing link is
-  `https://kuscher.github.io/windowcast/#h=<id>&k=<key>`; the fragment never
+  `https://windowcast-viewer.vercel.app/#h=<id>&k=<key>`; the fragment never
   reaches a server. The viewer stores it and removes it from the address bar.
 - **Authentication.** Host sends a nonce; viewer answers with
   HMAC-SHA256(key, "wc1|viewer|" + nonces + host and viewer DTLS
@@ -84,12 +84,14 @@ host page), `viewer/` (web app with manifest and service worker), `shared/`
 protocol), `vendor/peerjs.min.js` (MIT), `build.mjs` (assembles `dist/`),
 `test/` (node:test unit tests, a Puppeteer end-to-end test that uses a test
 pattern instead of desktop capture), `README.md` (install and use).
-GitHub Actions runs the unit tests and deploys `dist/viewer` to GitHub Pages;
-the extension ships as a zip on a GitHub Release.
+GitHub Actions runs the unit tests and publishes the extension zip on a GitHub
+Release. The viewer is deployed to its own origin on Vercel by `deploy-viewer.sh`,
+not to GitHub Pages: every Pages site of an account shares one origin, and the
+viewer keeps the pairing key in that origin's storage.
 
 ## Who does what
 
-Claude: all code, tests, the Pages deployment, the release zip and the
+Claude: all code, tests, the viewer deployment, the release zip and the
 instructions, and the end-to-end test in Chrome on the Mac. Alex: load the
 unpacked extension on the Chromebook, share a window, set the Chromebook's
 power settings, open the pairing link on the Googlebook and install the

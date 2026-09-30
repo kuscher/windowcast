@@ -14,7 +14,7 @@ node:test, Puppeteer with Chrome for Testing for the end-to-end test.
 
 - No build tooling beyond `build.mjs` (copies files). No frameworks.
 - The key never appears in logs, URLs sent to servers, or error messages.
-- Viewer URL: `https://kuscher.github.io/windowcast/`.
+- Viewer URL: `https://windowcast-viewer.vercel.app/`.
 - Host id format: `^wc-[a-z2-7]{26}$`; key: 32 random bytes, base64url.
 
 ## Review focus
@@ -52,5 +52,6 @@ node:test, Puppeteer with Chrome for Testing for the end-to-end test.
    viewer page connects through the real broker; checks frames arrive, a click
    and typing land in the test page, the toolbar navigates, a wrong key is
    rejected, and the viewer reconnects after the host page reloads.
-6. **Ship:** GitHub Actions workflow (tests, Pages deploy, release zip on
-   tags), enable Pages, first release, README with install steps.
+6. **Ship:** GitHub Actions workflow (tests, release zip on tags), viewer
+   deployed to Vercel with a strict content security policy, first release,
+   README with install steps.
